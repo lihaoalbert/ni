@@ -14,7 +14,7 @@ dependencies = [
     "alembic>=1.14.0",
     "asyncpg>=0.30.0",
     "redis>=5.2.0",
-    "qdrant-client>=1.12.0",
+    "qdrant-client==1.12.0",  # pin to match local Qdrant binary 1.12.4
     "sentence-transformers>=3.0.0",
     "httpx>=0.28.0",
     "tenacity>=9.0.0",

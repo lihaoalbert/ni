@@ -70,6 +70,12 @@ class QdrantStore:
         self.collection_name = collection_name
         self.embedding_provider = embedding_provider
 
+        # 如果 embedding 是 lazy load(初始 dim=0),强制加载以确定 dim
+        # 否则建 collection 时 size=0 会被 Qdrant server 拒绝
+        if embedding_provider is not None and embedding_provider.dim == 0:
+            if hasattr(embedding_provider, "_ensure_loaded"):
+                embedding_provider._ensure_loaded()
+
         if url == ":memory:":
             self._client = QdrantClient(location=":memory:")
         else:

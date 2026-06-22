@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # Vector DB
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
+    # Phase 2 Loop 4c — Memory Backend 开关
+    #   inmemory: 进程内 dict,无外部依赖(默认,CI/单测/本地)
+    #   qdrant:   向量库,需配 qdrant_url + embedding
+    memory_backend: Literal["inmemory", "qdrant"] = "inmemory"
+    qdrant_collection: str = "memory_facts"
+
+    # Phase 2 Loop 4b — Embedding 配置
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"  # sentence-transformers 模型
+    embedding_device: str = "cpu"  # cpu / mps(Mac GPU) / cuda
 
     # Cache
     redis_url: str = "redis://localhost:6379/0"

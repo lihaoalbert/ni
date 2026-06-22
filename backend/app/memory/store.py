@@ -146,22 +146,22 @@ class InMemoryStore:
 
 
 # 全局单例 — Day 3 用，Day 5+ 换依赖注入
-_global_store: InMemoryStore | None = None
+# Phase 2 Loop 4c: 改为从 store_factory 读取，根据 settings 选 backend
+from app.memory.store_factory import get_default_store, reset_default_store
 
 
-def get_memory_store() -> InMemoryStore:
-    """获取全局 memory store 单例"""
-    global _global_store
-    if _global_store is None:
-        _global_store = InMemoryStore()
-        logger.info("memory store initialized (in-memory)")
-    return _global_store
+def get_memory_store():
+    """获取全局 memory store（从 factory，支持 backend 切换）
+
+    Loop 4c 之前: 始终返回 InMemoryStore
+    Loop 4c 之后: 根据 settings.memory_backend 返回 InMemoryStore 或 QdrantStore
+    """
+    return get_default_store()
 
 
 def reset_memory_store() -> None:
-    """测试用：重置全局 store"""
-    global _global_store
-    _global_store = None
+    """测试用：重置全局 store 缓存"""
+    reset_default_store()
 
 
 # ===== 会话历史（Day 3 补充）=====

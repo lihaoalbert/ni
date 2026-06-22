@@ -175,6 +175,9 @@ Loop 3: 写 test_chat_end_to_end → 跑(红)→ 修集成 → 跑(绿)
 
 ## 三、3 个 Loop 实测(模板)
 
+> Phase 1 记忆管道完成,代码在 `app/memory/extractor.py` 和 `tests/test_memory_pipeline.py`。
+> Phase 2 Qdrant 向量库完成(下面新增 Loop 4 案例)。
+
 ### Loop 1: 骨架 / Skeleton
 
 **目标**: 验证"调用链"能跑通,实现可以假。
@@ -275,6 +278,55 @@ async def chat(..., extractor: MemoryExtractor = Depends(get_extractor)):
 - 端到端测试是"真实行为"的唯一验证
 - 单测能过 ≠ 集成就对
 - `asyncio.create_task` 的引用必须保留(否则 `RuntimeError: Task was destroyed but it is pending`)
+
+### Loop 4: 接入外部依赖(Qdrant 向量库)— Phase 2 实战
+
+**目标**: 让 `MemoryStore` 支持语义检索,从 substring → Jaccard → cosine 升级。
+
+**为什么这是好案例**: 接入外部二进制 + Python 包 + 模型文件,3 个新依赖,撞 5 个坑 — 比 Loop 1-3 更能体现"安全"价值。
+
+**Loop 4a (Phase A — Skeleton)**:
+```
+目标: QdrantStore 实现 Protocol,纯文本存 payload,Jaccard 检索(同 InMemoryStore)
+验收: 11 个新测试全过,109 → 120 旧测试不挂
+撞坑: PointIdsSelector → PointIdsList (qdrant-client API)
+      Protocol isinstance 需要 @runtime_checkable,改用 hasattr + 签名对比
+```
+
+**Loop 4b (Phase B — Real Embedding)**:
+```
+目标: 接入 sentence-transformers,cosine 语义检索
+验收: 8 个 embedding 测试 + 3 个 Qdrant 集成测试全过,语义召回验证
+撞坑: get_sentence_embedding_dimension → get_embedding_dimension (v5 重命名)
+      Lazy load dim=0 传给 QdrantStore → collection size=0 → server 400
+      修复: QdrantStore __init__ 强制 _ensure_loaded() 如果 dim=0
+```
+
+**Loop 4c (Phase C — Production Switch)**:
+```
+目标: MEMORY_BACKEND=qdrant|inmemory 开关,get_default_store factory
+验收: 5 个 factory 测试 + 1 个真 binary 集成测试,120 → 136
+撞坑: qdrant-client 1.18.0 与 server 1.12.4 不兼容(JSON 格式差异)
+      修复: pin qdrant-client==1.10.1(后改 1.12.0 — 1.10.1 仍失败,1.12.0 OK)
+```
+
+**Loop 4 关键决策**(用户在 review checkpoint 拍板):
+- Qdrant 跑法: 本地二进制(已通过 gh-proxy 绕过 github.com:443 封锁)
+- Embedding: 本地 sentence-transformers,免 API key
+- Loop 拆解: 3-Phase(skeleton → real → switch)
+- 模型: BAAI/bge-small-zh-v1.5 (512 维,中文 SOTA)
+- Schema 策略: 单 collection 按 dim 分名(自动重建)
+- Backend 默认: inmemory(安全)
+- API 兼容: 重命名 get_default_store,get_memory_store 作 alias(调用方不变)
+- 连接策略: lazy connect(实例化不连,首次操作才报错)
+
+**Loop 4 教训**:
+1. **外部依赖的兼容性是真坑** — qdrant-client 版本、Python 版本、网络访问(GFW)都要想清楚
+2. **lazy load 在工厂模式里有隐藏陷阱** — 实例化时如果 dim=0,server 报错
+3. **集成测试必须有真 binary 跑的版本** — :memory: 模式抓不到 server-side 的 bug
+4. **PIN 依赖版本要写 commit message 说清楚** — 升级时要主动 review
+
+**Loop 4 总投入**: 14 文件改动,~2400 行代码,6 个 task,8 次 commit,131 → 136 测试。
 
 ---
 
