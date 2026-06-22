@@ -1,11 +1,12 @@
-"""QdrantStore 测试 — Loop 4a 骨架
+"""QdrantStore 测试 — Loop 4a 骨架 + Loop 4b embedding 集成
 
-Phase A 目标: 验证 QdrantStore 实现 MemoryStore Protocol 契约
-Phase B (后续): 加 embedding + cosine 语义搜索
+Phase A (4a): 验证 QdrantStore 实现 MemoryStore Protocol 契约(无 embedding)
+Phase B (4b): 加 embedding + cosine 语义搜索
 
 测试策略:
 - 默认用 :memory: 模式,无外部依赖,CI 可跑
 - 集成测试 (QDRANT_URL=...) 时连接真实 Qdrant
+- embedding 测试用 FakeEmbeddingProvider(快、确定性)
 """
 from __future__ import annotations
 
@@ -18,12 +19,16 @@ from app.memory.qdrant_store import QdrantStore
 from app.memory.schemas import FactCategory, MemoryFact
 
 
-def _make_store() -> QdrantStore:
+def _make_store(embedding_provider=None) -> QdrantStore:
     """默认 :memory: 模式;设 QDRANT_TEST_URL 走真 Qdrant"""
     url = os.environ.get("QDRANT_TEST_URL", ":memory:")
     # 每个测试用独立 collection,避免污染
     collection = f"test_{uuid.uuid4().hex[:8]}"
-    return QdrantStore(url=url, collection_name=collection)
+    return QdrantStore(
+        url=url,
+        collection_name=collection,
+        embedding_provider=embedding_provider,
+    )
 
 
 @pytest.mark.asyncio
@@ -220,5 +225,94 @@ async def test_qdrant_store_empty_user_returns_empty() -> None:
         assert results == []
 
         assert await store.count("never_existed_user") == 0
+    finally:
+        store.close()
+
+
+# ===== Loop 4b: embedding 集成测试 =====
+
+
+@pytest.mark.asyncio
+async def test_qdrant_store_with_embedding_stores_vector() -> None:
+    """Loop 4b: 接入 embedding provider,add() 时存真向量
+
+    FakeEmbeddingProvider 输出 md5-based 向量,跟当前 dim 8 一致。
+    """
+    from tests.test_embedding import FakeEmbeddingProvider
+
+    provider = FakeEmbeddingProvider(dim=8)
+    store = _make_store(embedding_provider=provider)
+    try:
+        fact = await store.add("u1", FactCategory.BASIC, "用户叫小明")
+        assert isinstance(fact, MemoryFact)
+        # list_all 返回的 fact 应该跟没 embedding 时一致(payload 路径不变)
+        facts = await store.list_all("u1")
+        assert len(facts) == 1
+        assert facts[0].content == "用户叫小明"
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_qdrant_store_semantic_search_recall() -> None:
+    """Loop 4b 核心验收:语义召回
+
+    场景:存"用户叫小明",查询"用户叫什么名字" — 应能召回
+    用 FakeEmbeddingProvider 保证同输入同输出,语义关联需要测试 case 自带。
+    """
+    from tests.test_embedding import FakeEmbeddingProvider
+
+    # 设计一个 Fake provider:让"用户叫什么名字"和"用户叫小明"生成相似向量
+    class SemanticFakeProvider:
+        """让特定 pair 相似,验证语义召回路径"""
+        dim = 4
+
+        async def embed(self, text: str) -> list[float]:
+            return (await self.embed_batch([text]))[0]
+
+        async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+            result = []
+            for text in texts:
+                # "用户叫小明" 和 "用户叫什么名字" 都映射到方向 1
+                # "用户喜欢吃火锅" 映射到方向 2
+                if "小明" in text or "什么名字" in text:
+                    vec = [1.0, 0.0, 0.0, 0.0]
+                elif "火锅" in text or "喜欢" in text:
+                    vec = [0.0, 1.0, 0.0, 0.0]
+                else:
+                    vec = [0.5, 0.5, 0.0, 0.0]
+                result.append(vec)
+            return result
+
+    provider = SemanticFakeProvider()
+    store = _make_store(embedding_provider=provider)
+    try:
+        await store.add("u1", FactCategory.BASIC, "用户叫小明")
+        await store.add("u1", FactCategory.PREFERENCE, "用户喜欢吃火锅")
+
+        # 查询"用户叫什么名字"应召回"用户叫小明"(同方向),不召回"火锅"
+        results = await store.search("u1", "用户叫什么名字", top_k=5)
+
+        # 至少有一条,且最相关的是 name fact
+        assert len(results) >= 1
+        # 第一条应是 "用户叫小明"(cosine sim 最高)
+        assert results[0].content == "用户叫小明", (
+            f"expected semantic match for name, got: {[r.content for r in results]}"
+        )
+    finally:
+        store.close()
+
+
+@pytest.mark.asyncio
+async def test_qdrant_store_no_embedding_uses_jaccard() -> None:
+    """Loop 4b 向后兼容:不传 embedding_provider,search 仍用 Jaccard"""
+    store = _make_store()  # 无 embedding
+    try:
+        await store.add("u1", FactCategory.BASIC, "用户叫小明")
+
+        # Jaccard 路径: "用户叫什么" 应召回 "用户叫小明"
+        results = await store.search("u1", "用户叫什么", top_k=5)
+        assert len(results) >= 1
+        assert any("小明" in f.content for f in results)
     finally:
         store.close()

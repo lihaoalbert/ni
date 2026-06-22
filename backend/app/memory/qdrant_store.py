@@ -1,15 +1,16 @@
-"""QdrantStore — 向量库 Memory Store 实现 (Loop 4a)
+"""QdrantStore — 向量库 Memory Store 实现
 
-Phase A (当前): 纯文本存 Qdrant payload,Jaccard 检索 (跟 InMemoryStore 一致)
-Phase B (Loop 4b): 加 embedding provider,cosine 语义检索
+Loop 4a (Phase A): 纯文本存 Qdrant payload,Jaccard 检索
+Loop 4b (Phase B): 加 embedding provider,cosine 语义检索(可关闭,退回 Phase A 行为)
 
 API 完全兼容 MemoryStore Protocol,可直接替换 InMemoryStore。
 
 设计:
 - 单 collection 存所有用户的 fact(按 user_id 分组)
-- payload 存元数据,vector 字段保留(Phase A 用零向量,Phase B 换真向量)
-- 字符串 ID → Qdrant point ID 用 uuid5(稳定)
-- 客户端关闭用 close() 方法
+- payload 存元数据(content/user_id/category/...)
+- vector 字段:有 embedding 时存真向量;无时存零向量占位
+- 无 embedding_provider 时,search 退化用 Jaccard(Phase A 行为)
+- collection dim 跟 embedding dim 不匹配时,自动重建并警告
 """
 from __future__ import annotations
 
@@ -21,37 +22,42 @@ from typing import Any
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
 
+from app.llm.embedding import EmbeddingProvider
 from app.memory.schemas import FactCategory, MemoryFact
 
 logger = logging.getLogger(__name__)
 
 
-# Qdrant vector size — Phase A 用零向量占位,size 可以是任意固定值
+# Phase A 占位向量大小(无 embedding 时)
 _PHASE_A_VECTOR_SIZE = 4
 
 
 def _fact_id_to_point_id(fact_id: str) -> str:
-    """MemoryFact.id (12字符 hex) → Qdrant point ID
-
-    Qdrant 接受 str/int/UUID 作为 point ID。用 uuid5 让同 fact_id 永远映射到同 UUID。
-    """
+    """MemoryFact.id (12字符 hex) → Qdrant point ID (UUID 字符串)"""
     return str(uuid.uuid5(uuid.NAMESPACE_OID, f"fact:{fact_id}"))
-
-
-def _point_id_to_fact_id(point_id: str) -> str:
-    """Qdrant point ID → MemoryFact.id 反查(取后 12 字符 hex)"""
-    return point_id.split("-")[-1][:12]
 
 
 class QdrantStore:
     """Qdrant 向量库 Memory Store
 
     用法:
-        store = QdrantStore(url=":memory:")           # 内存模式(CI/单测)
-        store = QdrantStore(url="http://localhost:6333") # 本地/生产
+        # 纯文本(Jaccard,Phase A 行为)
+        store = QdrantStore(url=":memory:")
+
+        # 接入 embedding(Phase B,语义检索)
+        store = QdrantStore(
+            url=":memory:",
+            embedding_provider=SentenceTransformerProvider(),
+        )
+
         await store.add(...)
         ...
         store.close()
+
+    Args:
+        url: Qdrant URL 或 ":memory:" (默认,用于测试)
+        collection_name: collection 名
+        embedding_provider: 可选,提供时启用语义检索;None 时走 Jaccard
     """
 
     def __init__(
@@ -59,30 +65,58 @@ class QdrantStore:
         url: str = ":memory:",
         collection_name: str = "memory_facts",
         api_key: str | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         self.collection_name = collection_name
-        # :memory: 模式不用 api_key
+        self.embedding_provider = embedding_provider
+
         if url == ":memory:":
             self._client = QdrantClient(location=":memory:")
         else:
             self._client = QdrantClient(url=url, api_key=api_key)
 
-        # 确保 collection 存在
+        # 计算目标 dim
+        self._target_dim = (
+            embedding_provider.dim if embedding_provider else _PHASE_A_VECTOR_SIZE
+        )
+
         self._ensure_collection()
 
     def _ensure_collection(self) -> None:
-        """检查/创建 collection。Phase A 不存真向量,用零向量占位。"""
+        """检查/创建 collection。dim 不匹配时自动重建(开发期 OK,生产需迁移策略)。"""
         try:
-            self._client.get_collection(self.collection_name)
+            info = self._client.get_collection(self.collection_name)
+            existing_dim = info.config.params.vectors.size if info.config.params.vectors else None
         except Exception:
+            existing_dim = None
+
+        if existing_dim is None:
+            # 不存在 → 创建
             self._client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=qmodels.VectorParams(
-                    size=_PHASE_A_VECTOR_SIZE,
+                    size=self._target_dim,
                     distance=qmodels.Distance.COSINE,
                 ),
             )
-            logger.info("qdrant collection created: %s", self.collection_name)
+            logger.info(
+                "qdrant collection created: %s dim=%d",
+                self.collection_name, self._target_dim,
+            )
+        elif existing_dim != self._target_dim:
+            # dim 不匹配 → 重建(警告)
+            logger.warning(
+                "qdrant collection dim mismatch: %d != %d, recreating",
+                existing_dim, self._target_dim,
+            )
+            self._client.delete_collection(self.collection_name)
+            self._client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=qmodels.VectorParams(
+                    size=self._target_dim,
+                    distance=qmodels.Distance.COSINE,
+                ),
+            )
 
     # ===== CRUD =====
 
@@ -111,9 +145,15 @@ class QdrantStore:
             source=source,
         )
 
+        # 向量:有 embedding_provider 就用真向量,否则零向量占位
+        if self.embedding_provider is not None:
+            vector = await self.embedding_provider.embed(content)
+        else:
+            vector = [0.0] * _PHASE_A_VECTOR_SIZE
+
         point = qmodels.PointStruct(
             id=_fact_id_to_point_id(fact.id),
-            vector=[0.0] * _PHASE_A_VECTOR_SIZE,  # Phase A 占位
+            vector=vector,
             payload={
                 "fact_id": fact.id,
                 "user_id": user_id,
@@ -130,8 +170,8 @@ class QdrantStore:
             points=[point],
         )
         logger.info(
-            "qdrant memory added user=%s cat=%s fact=%s",
-            user_id, category.value, fact.id,
+            "qdrant memory added user=%s cat=%s fact=%s dim=%d",
+            user_id, category.value, fact.id, len(vector),
         )
         return fact
 
@@ -141,7 +181,6 @@ class QdrantStore:
         category: FactCategory,
         content: str,
     ) -> MemoryFact | None:
-        """查重 — 用 scroll + filter 找同 (user_id, category, content)"""
         points, _ = self._client.scroll(
             collection_name=self.collection_name,
             scroll_filter=qmodels.Filter(
@@ -172,15 +211,60 @@ class QdrantStore:
         top_k: int = 5,
         category: FactCategory | None = None,
     ) -> list[MemoryFact]:
-        """Loop 4a: Jaccard 字符级相似度(Phase A 不调向量)
+        """Loop 4b:有 embedding 时用 cosine 语义检索;否则用 Jaccard(Phase A 行为)"""
+        if self.embedding_provider is not None:
+            return await self._search_cosine(user_id, query, top_k, category)
+        return await self._search_jaccard(user_id, query, top_k, category)
 
-        后续 Loop 4b 替换为 cosine 语义检索。
-        """
-        # 1. 从 Qdrant 取 user 的所有 fact(payload filter)
+    async def _search_cosine(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int,
+        category: FactCategory | None,
+    ) -> list[MemoryFact]:
+        """向量检索 — 用 Qdrant query_points"""
+        query_vec = await self.embedding_provider.embed(query)  # type: ignore[union-attr]
+
+        must = [
+            qmodels.FieldCondition(
+                key="user_id", match=qmodels.MatchValue(value=user_id)
+            )
+        ]
+        if category is not None:
+            must.append(
+                qmodels.FieldCondition(
+                    key="category", match=qmodels.MatchValue(value=category.value)
+                )
+            )
+
+        hits = self._client.query_points(
+            collection_name=self.collection_name,
+            query=query_vec,
+            query_filter=qmodels.Filter(must=must),
+            limit=top_k,
+            with_payload=True,
+            with_vectors=False,
+        )
+
+        results: list[MemoryFact] = []
+        for hit in hits.points:
+            fact = self._payload_to_fact(hit.payload)
+            fact.touch()
+            results.append(fact)
+        return results
+
+    async def _search_jaccard(
+        self,
+        user_id: str,
+        query: str,
+        top_k: int,
+        category: FactCategory | None,
+    ) -> list[MemoryFact]:
+        """Phase A 行为:字符级 Jaccard"""
         points = self._scroll_user(user_id, category=category, limit=1000)
         candidates = [self._payload_to_fact(p.payload) for p in points]
 
-        # 2. Jaccard 评分(同 InMemoryStore.search 算法)
         query_chars = set(query.lower())
         scored: list[tuple[float, MemoryFact]] = []
         for f in candidates:
@@ -208,14 +292,11 @@ class QdrantStore:
     ) -> list[MemoryFact]:
         points = self._scroll_user(user_id, category=category, limit=1000)
         facts = [self._payload_to_fact(p.payload) for p in points]
-        # 按 created_at 倒序
         facts.sort(key=lambda f: f.created_at, reverse=True)
         return facts
 
     async def forget(self, user_id: str, fact_id: str) -> bool:
-        """删除指定 fact。需要校验 user_id 匹配(防止误删别人)。"""
         point_id = _fact_id_to_point_id(fact_id)
-        # 先确认 fact 存在且属于该 user
         try:
             points = self._client.retrieve(
                 collection_name=self.collection_name,
@@ -256,7 +337,6 @@ class QdrantStore:
         category: FactCategory | None = None,
         limit: int = 100,
     ) -> list[Any]:
-        """scroll 该 user 的所有 fact (Phase A 不分页,limit 是兜底)"""
         must = [
             qmodels.FieldCondition(
                 key="user_id", match=qmodels.MatchValue(value=user_id)
@@ -275,7 +355,7 @@ class QdrantStore:
             points, next_offset = self._client.scroll(
                 collection_name=self.collection_name,
                 scroll_filter=qmodels.Filter(must=must),
-                limit=min(limit, 100),  # Qdrant 一次最多 scroll 100
+                limit=min(limit, 100),
                 offset=offset,
                 with_payload=True,
                 with_vectors=False,
@@ -289,7 +369,6 @@ class QdrantStore:
 
     @staticmethod
     def _payload_to_fact(payload: dict | None) -> MemoryFact:
-        """Qdrant payload → MemoryFact"""
         if not payload:
             raise ValueError("empty payload")
         return MemoryFact(
@@ -298,12 +377,13 @@ class QdrantStore:
             category=FactCategory(payload.get("category", "basic")),
             content=payload.get("content", ""),
             confidence=float(payload.get("confidence", 1.0)),
-            created_at=datetime.fromisoformat(payload.get("created_at", datetime.now().isoformat())),
+            created_at=datetime.fromisoformat(
+                payload.get("created_at", datetime.now().isoformat())
+            ),
             source=payload.get("source", "agent"),
         )
 
     def close(self) -> None:
-        """关闭客户端 — :memory: 释放,远程连接关闭"""
         try:
             self._client.close()
         except Exception:
