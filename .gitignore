@@ -53,6 +53,10 @@ temp/
 data/
 backend/data/
 
+# ===== 本地服务二进制 / 数据目录 =====
+backend/.qdrant/
+backend/.vector_db/
+
 # ===== 凭据 / 密钥(防御性兜底) =====
 *.pem
 *.key
