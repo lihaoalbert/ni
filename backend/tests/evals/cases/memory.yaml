@@ -1,0 +1,33 @@
+# 永久记忆评测 — 验证 save_fact / search_memory 工具链路
+# tags: memory
+cases:
+  - name: 苏晚保存用户名字并能回忆
+    character_id: suwan
+    user_id: eval_memory_name
+    description: |
+      多轮对话：用户告知名字 → 模型应调 save_fact → 后续提问能回忆。
+      验证了 save_fact + 后续 search_memory 召回 + 角色扮演一致性。
+    tags: [memory, tools, multi_turn]
+    turns:
+      - user: 我叫小明，是一名产品经理
+        expect:
+          tools_called: [save_fact]
+      - user: 你还记得我叫什么名字吗？
+        expect:
+          must_contain: ["小明"]
+      - user: 我是做什么工作的？
+        expect:
+          must_contain: ["产品"]
+
+  - name: 苏晚保存用户偏好
+    character_id: suwan
+    user_id: eval_memory_preference
+    description: 用户分享偏好 → 模型保存 → 后续能想起
+    tags: [memory, tools, multi_turn]
+    turns:
+      - user: 我最近在听坂本龙一的音乐，很喜欢
+        expect:
+          tools_called: [save_fact]
+      - user: 我最近在听什么音乐？
+        expect:
+          must_contain: ["坂本龙一"]

@@ -1,0 +1,60 @@
+# ===== 环境变量(关键:绝不能提交 .env) =====
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.Python
+.venv/
+venv/
+env/
+**/.venv
+**/venv
+**/__pycache__
+
+# ===== 测试 / Lint 缓存 =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+**/.pytest_cache
+**/.ruff_cache
+
+# ===== 构建产物 =====
+dist/
+build/
+*.egg-info/
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== 临时 / 缓存 =====
+tmp/
+temp/
+.cache/
+
+# ===== 数据(避免误提交大的本地数据) =====
+data/
+backend/data/
+
+# ===== 凭据 / 密钥(防御性兜底) =====
+*.pem
+*.key
+*.crt
+**/secrets/
