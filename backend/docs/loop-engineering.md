@@ -563,7 +563,62 @@ STT → 200, {"text":"用户说了什么(短音频 ...)"}  ✓
 - ⚠️ 进程内 LRU cache 跨 worker 不共享(多 uvicorn worker 时命中率下降)— Loop 5d 可选接 Redis
 - ⚠️ 火山 STT body 格式是基于公开文档推断的,真实 key 跑通才算"绿灯" — 等用户拿真 key 集成测试
 
-### 9.3 Phase 2 完整路径回顾
+### 9.3 Phase 2 Loop 5d 案例:Redis TTS 缓存(多 worker 共享)
+
+**目标**:把进程内 LRU 升级为 Redis 缓存,多 uvicorn worker 共享同一缓存,降本更猛。
+
+**问题**:TTSCache (进程内 OrderedDict) 在 `uvicorn --workers 4` 时,4 个 worker 各有独立缓存。同一个 `"你好"` 在 worker A 命中了,worker B 还得再调一次火山 → 命中率 × 1/4。
+
+**实现**:
+- `app/voice/redis_cache.py` — `RedisTTSCache`
+  - Key: `SHA1(voice_id|format|text)` → 40 hex 字符(短 + 唯一 + 跨语言稳定)
+  - Value: 原始 bytes
+  - `SET key value EX <ttl>`(默认 7 天,TTS 输出确定性)
+  - 注入式 redis client(测试用 fakeredis,生产用 `redis.asyncio.from_url`)
+  - **Redis 不可用 → 降级直传 provider**(只记 warning,不报错)
+- `app/voice/factory.py` — `_build_tts_cache()` 切换器
+  - `tts_cache_backend=memory` → TTSCache(默认,无外部依赖)
+  - `tts_cache_backend=redis`  → RedisTTSCache(连不上则降级)
+- `app/config.py` — `tts_cache_backend` + `tts_cache_ttl_seconds` + `tts_cache_key_prefix`
+- `tests/test_voice_redis_cache.py` — 15 测试(key derivation + hit/miss + TTL + 多 client 共享 + Redis 降级 + factory 切换)
+- `pyproject.toml` — `fakeredis>=2.20.0`(dev 依赖)
+
+**关键决策**:
+- **Key 用 SHA1 hex 而不是文本**:Redis key 越短越好,中文 UTF-8 编码后 SHA1 都是 40 字符,空间 + 检索都最优
+- **注入式 redis client(不直接 import from_url)**:测试用 fakeredis 替换,生产用 `redis.asyncio.from_url`;_create_redis_client 函数可 monkeypatch
+- **Redis 挂了不报错,只降级**:TTS 是 best-effort 优化,不是 critical path;Redis 挂 → 降级到每次都调 provider(但应用不挂)
+- **TTL 7 天**:TTS 输出对同 text+voice+format 永远一致(火山不引入随机性),7 天足够覆盖所有重复
+- **多 worker 共享通过单 Redis 实例**:不需要 Redis Cluster / Sentinel(单实例够用,后期可加)
+
+**测试技巧 — fakeredis**:
+```python
+import fakeredis.aioredis
+fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
+# 跟真 redis.asyncio.Redis 行为一致,但全内存
+# 测试用 monkeypatch.setattr 替换 _create_redis_client 工厂
+```
+
+**实测关键测试 — 多 worker 共享**:
+```python
+shared_redis = fakeredis.aioredis.FakeRedis()
+p1, p2 = CountingProvider("w1"), CountingProvider("w2")
+cache1 = RedisTTSCache(p1, shared_redis)
+cache2 = RedisTTSCache(p2, shared_redis)
+await cache1.synthesize("hello")  # p1 调一次
+await cache2.synthesize("hello")  # p2 命中,call_count=0
+assert p2.call_count == 0  # ✓ 跨 worker 命中
+```
+
+**基线变化**:191 → 206 测试(+15),全部通过,64s。
+
+**Review Checkpoint 总结**:
+- ✅ 默认仍是 memory(向后兼容,无 Redis 也能跑)
+- ✅ 切 redis 只需改 .env 一行:`TTS_CACHE_BACKEND=redis`
+- ✅ 降级路径有日志但不影响请求
+- ✅ fakeredis 让 Redis 测试零外部依赖
+- ⚠️ 真实 Redis 连通性靠 `REDIS_URL`,生产部署需要确保 Redis 高可用
+
+### 9.4 Phase 2 完整路径回顾
 
 ```
 Day 1-7 (Phase 1): LLM/Agent/Memory/Evals  → 109 测试,9 轮迭代
@@ -571,6 +626,7 @@ Loop 4 (Qdrant 向量库)                    → 165 → 173 测试
 Loop 5a (Voice Protocol + Mock)           → 154 → 154 测试 (纯加法,0 改动)
 Loop 5b (火山引擎真实 API)                 → 154 → 173 测试 (+19)
 Loop 5c (API 端点 + 生产开关)              → 173 → 191 测试 (+18)
+Loop 5d (Redis TTS 缓存,多 worker 共享)    → 191 → 206 测试 (+15)
 ```
 
 **Phase 2 完整产出**:

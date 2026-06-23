@@ -75,8 +75,12 @@ class Settings(BaseSettings):
     volc_stt_endpoint: str = "https://openspeech.bytedance.com/api/v1/asr"
     volc_cluster: str = "volcano_tts"
     volc_default_voice: str = "zh_female_qingxin"
-    # TTS 缓存大小(进程内 dict LRU)
-    tts_cache_max_size: int = 128
+    # TTS 缓存配置
+    # backend: memory (进程内 LRU,默认) | redis (多 worker 共享)
+    tts_cache_backend: Literal["memory", "redis"] = "memory"
+    tts_cache_max_size: int = 128  # memory backend 用
+    tts_cache_ttl_seconds: int = 7 * 24 * 3600  # 7 天,redis backend 用
+    tts_cache_key_prefix: str = "tts:"
 
 
 @lru_cache

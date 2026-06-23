@@ -28,6 +28,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.7.0",
     "mypy>=1.13.0",
+    "fakeredis>=2.20.0",  # Loop 5d: in-process Redis for TTS cache tests
 ]
 
 [build-system]
