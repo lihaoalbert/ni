@@ -12,12 +12,46 @@ public struct SSEEvent: Sendable, Equatable {
     public let inputTokens: Int?
     public let outputTokens: Int?
 
+    public init(
+        type: String,
+        text: String? = nil,
+        error: String? = nil,
+        model: String? = nil,
+        iterations: Int? = nil,
+        inputTokens: Int? = nil,
+        outputTokens: Int? = nil
+    ) {
+        self.type = type
+        self.text = text
+        self.error = error
+        self.model = model
+        self.iterations = iterations
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+    }
+
     public var isTerminal: Bool {
         type == "done" || type == "error"
     }
 
     public var isText: Bool {
         type == "text"
+    }
+}
+
+// MARK: - Factory helpers (Loop 7 测试用)
+
+public extension SSEEvent {
+    static func text(_ text: String) -> SSEEvent {
+        SSEEvent(type: "text", text: text)
+    }
+
+    static var done: SSEEvent {
+        SSEEvent(type: "done")
+    }
+
+    static func error(_ message: String) -> SSEEvent {
+        SSEEvent(type: "error", error: message)
     }
 }
 

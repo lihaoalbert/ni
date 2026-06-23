@@ -1,4 +1,5 @@
-// 全局 App 状态 — token 存储 + 路由
+// 全局 App 状态 — token 存储 + 路由 + 持久化层
+// Loop 7: 持有 Database + MemoryStore,App 全程单例,ChatViewModel 通过这里注入
 import Foundation
 import Observation
 import CompanionCore
@@ -19,9 +20,36 @@ public final class AppState {
 
     private let tokenKey = "auth_token_json"
     private let api: APIClient
+    public let database: Database?
+    public let memory: MemoryStore
 
     public init(api: APIClient = APIClient()) {
         self.api = api
+
+        // Loop 7: SQLite + 4 层记忆
+        // Database 初始化失败时降级到 InMemoryMemoryStore(测试 / 极端环境)
+        let db: Database?
+        do {
+            db = try Database(path: DatabaseFactory.defaultPath())
+        } catch {
+            print("[AppState] Database init failed: \(error) — falling back to in-memory")
+            db = nil
+        }
+        self.database = db
+
+        if let db {
+            let msgRepo = MessageRepository(database: db)
+            let summaryRepo = SummaryRepository(database: db)
+            let factRepo = FactRepository(database: db)
+            self.memory = DefaultMemoryStore(
+                messageRepository: msgRepo,
+                summaryRepository: summaryRepo,
+                factRepository: factRepo
+            )
+        } else {
+            self.memory = InMemoryMemoryStore()
+        }
+
         if let data = UserDefaults.standard.data(forKey: tokenKey),
            let t = try? JSONDecoder().decode(AuthToken.self, from: data) {
             self.token = t
@@ -66,6 +94,37 @@ public final class AppState {
             platformBase: AppConfig.platformBaseURL,
             chatBase: AppConfig.chatBaseURL,
             tokenProvider: { saved?.accessToken }
+        )
+    }
+
+    /// 同一 (user, character) 复用 conversationId — 保证多次进同一角色聊天看到的是同一段历史
+    public func conversationID(for characterID: String) -> String {
+        // 用 localUserID(端云混合架构,客户端生成)+ characterId 拼接;跨设备同步在 Loop 10
+        return "conv_\(AppConfig.localUserID)_\(characterID)"
+    }
+
+    /// ChatViewModel 工厂 — 进聊天页时调用一次
+    public func makeChatViewModel(characterID: String, characterName: String, api: APIClientProtocol) -> ChatViewModel {
+        let convID = conversationID(for: characterID)
+        let userID = AppConfig.localUserID
+
+        // 保证 conversation 行存在(供 messages.conversation_id 外键)
+        if let db = database {
+            let convRepo = ConversationRepository(database: db)
+            _ = try? convRepo.upsert(
+                id: convID,
+                characterId: characterID,
+                characterName: characterName
+            )
+        }
+
+        return ChatViewModel(
+            characterID: characterID,
+            characterName: characterName,
+            userID: userID,
+            conversationID: convID,
+            api: api,
+            memory: memory
         )
     }
 

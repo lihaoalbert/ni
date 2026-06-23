@@ -1,4 +1,6 @@
 // 聊天 ViewModel — 调 /chat/stream,累积 text delta,处理 done/error
+// Loop 7: 接入 MemoryStore — 每次 user send / 收到 assistant reply 都 appendAndPersist 到 SQLite;
+//         init 时 hydrateWorking 把历史重新灌进内存,实现"刷新不丢"
 import Foundation
 import Observation
 
@@ -19,19 +21,38 @@ public final class ChatViewModel {
     public let characterID: String
     public let characterName: String
     public let userID: String
+    public let conversationID: String
+
     private let api: APIClientProtocol
+    private let memory: MemoryStore
     private var streamTask: Task<Void, Never>?
 
     public init(
         characterID: String,
         characterName: String,
         userID: String = AppConfig.localUserID,
-        api: APIClientProtocol
+        conversationID: String,
+        api: APIClientProtocol,
+        memory: MemoryStore
     ) {
         self.characterID = characterID
         self.characterName = characterName
         self.userID = userID
+        self.conversationID = conversationID
         self.api = api
+        self.memory = memory
+        hydrateFromMemory()
+    }
+
+    /// 启动时把历史从 MemoryStore 拉回内存;失败也继续(空历史开始)
+    private func hydrateFromMemory() {
+        do {
+            try memory.hydrateWorking(conversationId: conversationID)
+            messages = memory.workingMessages(conversationId: conversationID)
+        } catch {
+            // 启动失败不应该阻塞 UI — 内存为空即可,后续 send 仍能落盘
+            messages = []
+        }
     }
 
     public func send(_ text: String) {
@@ -40,7 +61,10 @@ public final class ChatViewModel {
         if case .streaming = status { return }
         if case .sending = status { return }
 
-        messages.append(ChatMessage(role: .user, text: trimmed))
+        let userMessage = ChatMessage(role: .user, text: trimmed)
+        messages.append(userMessage)
+        // 落 SQLite + 更新 in-memory 缓存
+        try? memory.appendAndPersist(conversationId: conversationID, message: userMessage)
         currentStreamingText = ""
         status = .sending
 
@@ -53,6 +77,28 @@ public final class ChatViewModel {
         streamTask?.cancel()
         streamTask = nil
         status = .idle
+    }
+
+    /// UI 显式触发(Loop 7 不自动抽取 — 端上 LLM 在 Loop 8)
+    /// 当前最简策略:把整段消息原文保存为 fact,后续 Loop 8 由端上 LLM 做摘要 + 分类
+    public func saveUserMessageAsFact(_ message: ChatMessage, category: FactRecord.Category = .basic) {
+        let now = Date()
+        let fact = FactRecord(
+            id: UUID().uuidString,
+            userId: userID,
+            category: category,
+            content: message.text,
+            confidence: 0.6,
+            createdAt: now,
+            lastAccessedAt: now,
+            accessCount: 0,
+            sourceMessageId: message.id.uuidString
+        )
+        memory.saveFact(fact)
+    }
+
+    public func forget(factID: String) {
+        memory.forgetFact(id: factID)
     }
 
     private func runStream(message: String) async {
@@ -96,7 +142,6 @@ public final class ChatViewModel {
             if currentStreamingText.isEmpty {
                 status = .error(msg)
             } else {
-                // 流一半出错 → 把已累积 text 当作部分回复,再报错
                 commitStreamedMessage()
                 status = .error(msg)
             }
@@ -105,7 +150,9 @@ public final class ChatViewModel {
 
     private func commitStreamedMessage() {
         if !currentStreamingText.isEmpty {
-            messages.append(ChatMessage(role: .assistant, text: currentStreamingText))
+            let assistantMessage = ChatMessage(role: .assistant, text: currentStreamingText)
+            messages.append(assistantMessage)
+            try? memory.appendAndPersist(conversationId: conversationID, message: assistantMessage)
             currentStreamingText = ""
         }
         status = .done

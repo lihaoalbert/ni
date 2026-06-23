@@ -16,7 +16,8 @@ public struct ChatView: View {
         self.characterID = characterID
         self.characterName = characterName
         self.avatarURL = avatarURL
-        self._viewModel = State(initialValue: ChatViewModel(
+        // Loop 7: 走 AppState 工厂,自动绑定 conversationId + 注入 MemoryStore(冷启动重水合历史)
+        self._viewModel = State(initialValue: appState.makeChatViewModel(
             characterID: characterID,
             characterName: characterName,
             api: appState.apiClient()
@@ -55,6 +56,16 @@ public struct ChatView: View {
                     ForEach(viewModel.messages) { msg in
                         MessageBubble(message: msg, characterName: characterName, avatarURL: avatarURL)
                             .id(msg.id)
+                            // Loop 7: 长按 user 消息 → "记住这件事"(显式 save_fact,Loop 8 由端上 LLM 自动抽取)
+                            .contextMenu {
+                                if msg.role == .user {
+                                    Button {
+                                        viewModel.saveUserMessageAsFact(msg)
+                                    } label: {
+                                        Label("记住这件事", systemImage: "bookmark")
+                                    }
+                                }
+                            }
                     }
                     if !viewModel.currentStreamingText.isEmpty {
                         StreamingBubble(text: viewModel.currentStreamingText, characterName: characterName, avatarURL: avatarURL)
