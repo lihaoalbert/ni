@@ -1,4 +1,6 @@
 // App 入口 — 路由 LoginView / IPListView / ChatView
+// Loop 8: 登录后 warmup LLM(异步下载/加载端上模型);ChatView 通过 appState.llm?.state 显示进度
+//  注意:不在 App 启动立即 warm,避免未登录用户被下载 1.2GB
 import SwiftUI
 
 @main
@@ -9,6 +11,11 @@ struct CompanionAIApp: App {
         WindowGroup {
             RootView()
                 .environment(appState)
+                .task(id: appState.token?.accessToken) {
+                    // token 变化时触发(从 nil → 字符串即"刚登录");已 ready 时 no-op
+                    guard appState.token != nil else { return }
+                    await appState.warmupLLM()
+                }
         }
     }
 }

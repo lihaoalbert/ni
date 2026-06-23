@@ -17,13 +17,22 @@ let package = Package(
         // Loop 7: SQLite 持久层 — Stephen Celis 的 SQLite.swift(stable, 纯 Swift, Expression API)
         // 0.15.3 兼容 swift-tools-version 5.9(我们用 5.10,匹配);master / 0.16.0 已升到 6.1,太新
         .package(url: "https://github.com/stephencelis/SQLite.swift.git", from: "0.15.3"),
+
+        // Loop 8: 端上 LLM — mlx-swift(Apple Silicon only)+ mlx-swift-examples(MLXLLM / MLXLMCommon)
+        // mlx-swift master 已升 swift-tools 6.3,太新;0.25.x 系列兼容 5.10
+        // mlx-swift-examples 2.25.6 把 MLXLLM 暴露为 SwiftPM 库,新版(>3.0)已不暴露
+        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.25.5")),
+        .package(url: "https://github.com/ml-explore/mlx-swift-examples", exact: "2.25.6"),
     ],
     targets: [
-        // 库:纯 Foundation + 模型 + 网络层 + 存储 + 记忆(SwiftUI 无关,Android KMP 复用候选)
+        // 库:纯 Foundation + 模型 + 网络层 + 存储 + 记忆 + 端上 LLM(SwiftUI 无关,Android KMP 复用候选)
         .target(
             name: "CompanionCore",
             dependencies: [
                 .product(name: "SQLite", package: "SQLite.swift"),
+                // Loop 8: 端上 LLM — MLXLLM 提供 ModelContainer + generate;MLXLMCommon 提供 LLMRegistry
+                .product(name: "MLXLLM", package: "mlx-swift-examples"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
             ],
             path: "Sources/CompanionCore"
         ),

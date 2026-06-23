@@ -1,7 +1,8 @@
 # iOS App — CompanionAI
 
-> Phase 3 Loop 7: iOS 17+ SwiftUI App + CompanionCore 库 + SQLite 4 层记忆。
-> 文字聊天,流式响应,集成 ips-mock 拉取数字人列表,聊天历史与长期事实持久化到端上 SQLite。
+> Phase 3 Loop 8: iOS 17+ SwiftUI App + CompanionCore 库 + SQLite 4 层记忆 + 端上 LLM 自动抽取。
+> 文字聊天,流式响应,集成 ips-mock 拉取数字人列表,聊天历史与长期事实持久化到端上 SQLite,
+> 登录后异步 warmup 端上 Qwen3-1.7B-Instruct(MLX 4-bit)做 fact 抽取 + 滚动摘要生成。
 
 ## 启动
 
@@ -24,6 +25,15 @@ open /Users/app/ni/ios/Package.swift
 ```
 
 Xcode 自动识别 SwiftPM 包。选 `CompanionAI` scheme,选 iPhone 16 模拟器,⌘R 运行。
+
+### 2.5 命令行构建 + 部署(推荐)
+
+Xcode 在 SwiftPM 包上跑 ⌘R 有时会卡 SPM 解析;命令行更可控:
+```bash
+cd /Users/app/ni/ios
+./scripts/install-simulator.sh
+```
+脚本:build → 复制二进制 + 资源 bundle 到模拟器已部署的 `.app` → re-sign → launch。
 
 ### 3. Info.plist 允许 HTTP(localhost)
 
@@ -49,7 +59,7 @@ cd /Users/app/ni/ios
 swift test
 ```
 
-51 个测试(SSEReader × 10, APIClient × 5, UTF8Boundary × 4, Database × 6, Repository × 13, MemoryStore × 9, ChatViewModel × 4),全绿。
+68 个测试(SSEReader × 10, APIClient × 5, UTF8Boundary × 4, Database × 6, Repository × 13, MemoryStore × 9, ChatViewModel × 4, FactExtractor × 6, SummaryGenerator × 3, ChatViewModel+LLM × 5, OnDeviceLLMService × 3),全绿。
 
 ## 项目结构
 
@@ -62,6 +72,7 @@ ios/
 │   │   ├── Networking/        APIClient (AsyncThrowingStream) + SSEReader + UTF8Boundary
 │   │   ├── Storage/           Database + Conversation/Message/Fact/Summary Repository
 │   │   ├── Memory/            MemoryStore protocol + DefaultMemoryStore + InMemoryMemoryStore
+│   │   ├── LLM/               OnDeviceLLMService (MLX) + FactExtractor + SummaryGenerator
 │   │   ├── ViewModels/        IPListViewModel + ChatViewModel (@Observable)
 │   │   └── Config/            AppConfig (后端地址 + local user_id)
 │   └── CompanionAI/           可执行 App(SwiftUI)
@@ -117,9 +128,43 @@ iOS 17+ 新的 Observation 框架(替代 ObservableObject),粒度更细、rebuil
 
 **显式 save_fact**:在聊天页长按用户消息 → 弹出"记住这件事" → `MemoryStore.saveFact(FactRecord)`,下次对话起点可被 `listFacts` / `semanticSearch` 召回。
 
+### Loop 8:端上 LLM 自动抽取(MLX + Qwen3)
+
+每轮 assistant 回复完成后,异步跑两道端上 LLM 任务:
+
+| 任务 | 触发时机 | 输入 | 输出 |
+|---|---|---|---|
+| Fact 抽取 | 每轮 assistant 完成 | 最近 6 条消息 | JSON 数组 → `facts` 表去重入库 |
+| 摘要生成 | 累计 10 轮 user 消息 | 最近 20 条消息 | 200 字中文第三人称摘要 → `summaries` 表 |
+
+**模型选型**:`Qwen3-1.7B-Instruct-4bit`(mlx-community 镜像,~1.2GB 磁盘 + 内存)
+- 中文支持好、4-bit 量化,Apple Silicon 上推理 ~20-30 tokens/s
+- 通过 `mlx-swift-examples` 的 `LLMRegistry` + `MLXChatSession` 加载,无需手写 tokenize
+
+**Warmup 时机**:`CompanionAIApp.task(id: appState.token?.accessToken)` — 用户登录后异步启动,避免未登录用户被下载 1.2GB。ChatView 顶部 badge 实时显示进度(`downloading X%` → `loading` → `就绪` / `失败`)。
+
+**协议化注入**:
+```swift
+public protocol OnDeviceLLMServiceProtocol: Sendable {
+    var state: State { get }
+    func load(progressHandler: (@Sendable (Double) -> Void)?) async throws
+    func generate(prompt: String, systemPrompt: String?, maxTokens: Int, temperature: Float) async throws -> String
+}
+```
+测试用 `MockOnDeviceLLM`(`nextResponse` / `nextError` 注入)替换真模型,无 GPU 也可单测。
+
+**Fact 抽取提示词**:`FactExtractor` system prompt 明确要求:
+- category ∈ {basic, preference, relationship, work, event}
+- content 10-50 字陈述句,不要"用户"或"TA"作主语
+- confidence < 0.3 的丢弃
+- 无可抽事实时只输出 `[]`
+
+**JSON 解析容错**:正则找 `[ ... ]` 区间(容忍嵌套 + 转义 + markdown 围栏),`JSONDecoder` 解码;失败返回空数组,聊天流不受影响(LLM 抽取是 best-effort)。
+
+**去重**:`saveFact` 前用 `listFacts(userId:, category: nil)` 查重,`content` 相同则跳过(防止同一事实重复入库)。
+
 ## 下一步
 
-- Loop 8: 端上 LLM(Qwen3-VL-2B-Instruct MLX 4-bit)— 自动抽取 fact + 生成 summary
 - Loop 9: 端上 TTS/STT(sherpa-onnx)
 - Loop 10: PIPL 合规 + 跨设备同步 + sqlite-vec 真向量检索
 - Loop 11: 数字人形象(Path A: MuseTalk + 2K PNG)
@@ -129,5 +174,16 @@ iOS 17+ 新的 Observation 框架(替代 ObservableObject),粒度更细、rebuil
 - 模拟器跑 HTTP localhost 需要 `NSAllowsLocalNetworking`(见上文)
 - 真机调试需要 Apple Developer 账号($99/年)+ 后端暴露到局域网
 - 模拟器上 iOS Data Protection 是 no-op(`xattr` 不显示 protection class),真机才会生效
+- **端上 LLM 只能在真机跑**:MLX 在 iOS 模拟器上初始化 Metal device 时 abort(`MTLSimDevice.architecture()` 返回 null,已知 MLX issue)— `AppState` 用 `!targetEnvironment(simulator)` 守门,模拟器上 `llm` 为 nil,IPList 顶栏不显示 banner,ChatView 不会触发抽取
+- 模型未 ready 时发消息不会失败,只是不会触发 fact 抽取 + summary;ChatView 顶部 badge 提示当前状态
 - iCloud 跨设备同步 Loop 10 PIPL 合规阶段做
-- `semanticSearch` 当前是字符串包含匹配,Loop 9 替换为真向量检索
+- `semanticSearch` 当前是字符串包含匹配,Loop 10 替换为 sqlite-vec 真向量检索
+
+## 部署到模拟器
+
+`scripts/install-simulator.sh` 一键构建 + 部署 + 启动:
+```bash
+./scripts/install-simulator.sh                    # 默认 iPhone 16
+./scripts/install-simulator.sh "iPhone 16 Pro"    # 指定设备
+```
+脚本除了复制二进制,还会把 MLX 的资源 bundle(`mlx-swift_Cmlx.bundle`,含 `default.metallib`)和 Hub 的资源 bundle 一起放到 `.app` 根目录 — SwiftPM 的 `xcodebuild` 默认不会自动做这件事。

@@ -1,5 +1,6 @@
-// 全局 App 状态 — token 存储 + 路由 + 持久化层
+// 全局 App 状态 — token 存储 + 路由 + 持久化层 + 端上 LLM
 // Loop 7: 持有 Database + MemoryStore,App 全程单例,ChatViewModel 通过这里注入
+// Loop 8: 持有 OnDeviceLLMService + FactExtractor + SummaryGenerator;ChatViewModel 通过工厂注入
 import Foundation
 import Observation
 import CompanionCore
@@ -23,11 +24,15 @@ public final class AppState {
     public let database: Database?
     public let memory: MemoryStore
 
+    // Loop 8: 端上 LLM — 单例服务,App 全程一份
+    public let llm: OnDeviceLLMService?
+    public let factExtractor: FactExtractor?
+    public let summaryGenerator: SummaryGenerator?
+
     public init(api: APIClient = APIClient()) {
         self.api = api
 
         // Loop 7: SQLite + 4 层记忆
-        // Database 初始化失败时降级到 InMemoryMemoryStore(测试 / 极端环境)
         let db: Database?
         do {
             db = try Database(path: DatabaseFactory.defaultPath())
@@ -50,11 +55,30 @@ public final class AppState {
             self.memory = InMemoryMemoryStore()
         }
 
+        // Loop 8: 端上 LLM — Apple Silicon 真机才有 Metal 设备;模拟器上 MLX 会在
+        // device.cpp:300 abort(MTLSimDevice 的 architecture() 返回 null,已知 issue)
+        // 真机才能跑端上 LLM
+        let llmService: OnDeviceLLMService?
+        #if arch(arm64) && os(iOS) && !targetEnvironment(simulator)
+        llmService = OnDeviceLLMService()
+        #else
+        llmService = nil
+        #endif
+        self.llm = llmService
+        self.factExtractor = llmService.map { FactExtractor(llm: $0) }
+        self.summaryGenerator = llmService.map { SummaryGenerator(llm: $0) }
+
         if let data = UserDefaults.standard.data(forKey: tokenKey),
            let t = try? JSONDecoder().decode(AuthToken.self, from: data) {
             self.token = t
             self.route = .ipList
         }
+    }
+
+    /// 异步触发 LLM 加载 — App 启动后调一次,UI 用 llm.state 显示下载/加载进度
+    public func warmupLLM(progressHandler: (@Sendable (Double) -> Void)? = nil) async {
+        guard let llm else { return }
+        try? await llm.load(progressHandler: progressHandler)
     }
 
     public func login(email: String, password: String) async throws {
@@ -124,7 +148,9 @@ public final class AppState {
             userID: userID,
             conversationID: convID,
             api: api,
-            memory: memory
+            memory: memory,
+            factExtractor: factExtractor,
+            summaryGenerator: summaryGenerator
         )
     }
 

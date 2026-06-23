@@ -27,6 +27,7 @@ public struct ChatView: View {
     public var body: some View {
         VStack(spacing: 0) {
             messageList
+            extractionHint  // Loop 8: 显示"自动记住中…"
             inputBar
         }
         .navigationTitle(characterName)
@@ -37,6 +38,55 @@ public struct ChatView: View {
             ToolbarItem(placement: toolbarLeading) {
                 Button("返回") { appState.backToList() }
             }
+            #if os(iOS)
+            ToolbarItem(placement: .topBarTrailing) {
+                llmStatusBadge
+            }
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private var extractionHint: some View {
+        if viewModel.isAutoExtracting {
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.7)
+                Text("正在自动记住…")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal)
+            .padding(.vertical, 4)
+            #if os(iOS)
+            .background(Color(uiColor: .secondarySystemBackground))
+            #else
+            .background(Color.gray.opacity(0.1))
+            #endif
+        }
+    }
+
+    @ViewBuilder
+    private var llmStatusBadge: some View {
+        let state = appState.llm?.state ?? .idle
+        switch state {
+        case .idle, .ready:
+            EmptyView()
+        case .downloading(let p):
+            HStack(spacing: 4) {
+                ProgressView().scaleEffect(0.6)
+                Text("模型 \(Int(p * 100))%")
+                    .font(.caption2)
+            }
+        case .loading:
+            HStack(spacing: 4) {
+                ProgressView().scaleEffect(0.6)
+                Text("加载模型…").font(.caption2)
+            }
+        case .error(let msg):
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityLabel("LLM 错误: \(msg)")
         }
     }
 

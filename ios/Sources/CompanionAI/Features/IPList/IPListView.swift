@@ -13,16 +13,52 @@ public struct IPListView: View {
 
     public var body: some View {
         NavigationStack {
-            content
-                .navigationTitle("我的数字人")
-                .toolbar {
-                    ToolbarItem(placement: toolbarTrailing) {
-                        Button("登出") { appState.logout() }
-                    }
+            VStack(spacing: 0) {
+                llmStatusBanner
+                content
+            }
+            .navigationTitle("我的数字人")
+            .toolbar {
+                ToolbarItem(placement: toolbarTrailing) {
+                    Button("登出") { appState.logout() }
                 }
-                .task { await viewModel.loadIfNeeded() }
-                .refreshable { await viewModel.load() }
+            }
+            .task { await viewModel.loadIfNeeded() }
+            .refreshable { await viewModel.load() }
         }
+    }
+
+    /// Loop 8: 端上 LLM 加载状态条 — 首次启动会下载 1.2GB,放在 IPList 顶部
+    /// 让用户不必进聊天也能看到加载进度(避免进聊天页后才看到 toolbar 角落的小 badge)
+    @ViewBuilder
+    private var llmStatusBanner: some View {
+        if let llm = appState.llm {
+            switch llm.state {
+            case .idle, .ready:
+                EmptyView()
+            case .downloading(let progress):
+                statusBanner(icon: "arrow.down.circle", text: "端上 LLM 下载中 \(Int(progress * 100))%", tint: .blue)
+            case .loading:
+                statusBanner(icon: "gearshape.2", text: "端上 LLM 加载中…", tint: .blue)
+            case .error(let msg):
+                statusBanner(icon: "exclamationmark.triangle.fill", text: "端上 LLM 失败: \(msg)", tint: .orange)
+            }
+        }
+    }
+
+    private func statusBanner(icon: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).foregroundStyle(tint)
+            Text(text).font(.caption2).foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+        #if os(iOS)
+        .background(Color(uiColor: .secondarySystemBackground))
+        #else
+        .background(Color.gray.opacity(0.1))
+        #endif
     }
 
     private var toolbarTrailing: ToolbarItemPlacement {
