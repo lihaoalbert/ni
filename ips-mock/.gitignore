@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+assets/source/   # 真实形象原图备份,不入库

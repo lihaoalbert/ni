@@ -47,13 +47,35 @@ uv pip install -e ".[dev]"
 
 3 个数字人 IP,见 `data/characters.json`:
 
-| ID | 名字 | 人设 |
-|---|---|---|
-| `ip_001` | 苏晚 | 28 岁建筑设计师,独居上海 |
-| `ip_002` | 陆星河 | 26 岁 AI 工程师,北京 |
-| `ip_003` | 林书白 | 民国江南书香女子 |
+| ID | 名字 | 人设 | 形象 |
+|---|---|---|---|
+| `ip_001` | 苏晚 | 28 岁建筑设计师,独居上海 | **真实形象**(`assets/source/`,已处理为方形人脸正面 PNG) |
+| `ip_002` | 陆星河 | 26 岁 AI 工程师,北京 | ffmpeg 占位色块(待补真实形象) |
+| `ip_003` | 林书白 | 民国江南书香女子 | ffmpeg 占位色块(待补真实形象) |
 
-`/v1/cdn/{ip_id}/{size}.png` 返回 ffmpeg 生成的彩色占位 PNG(每个 IP 颜色稳定)。
+### 形象处理
+
+`ip_001` 的原图(`形象-女青001.jpg`, 844×1128 JPEG)处理 pipeline:
+```bash
+ffmpeg -i source.jpg -vf "crop=844:844:0:140,scale=W:W:flags=lanczos" ip_001_W.png
+```
+- 居中裁剪到 844×844(头部+肩部,脸部居中,头顶留白给 MuseTalk 头动空间)
+- lanczos 重采样到 4 档
+- 输出 PNG(无 alpha — 背景保持原奶白色窗帘)
+
+| size | 像素 | 大小 | 用途 |
+|---|---|---|---|
+| 256 | 256×256 | ~90 KB | 列表缩略图(avatar_url) |
+| 1k  | 1024×1024 | ~890 KB | 列表预览(preview_url) |
+| 2k  | 2048×2048 | ~2.3 MB | **MuseTalk 驱动主图**(preview_2k_url) |
+| 4k  | 4096×4096 | ~5.9 MB | iPad/投屏(4k upscale,清晰度下降) |
+
+> **真实平台要求 vs Mock 现状**
+> - 规范要求:avatar 256x256 **JPEG** / preview 1024+ **PNG 透明背景**
+> - Mock 现状:全部 PNG,背景奶白色(非透明)
+> - 切换到真实平台时,真实 `preview_2k.png` 通常自带透明背景 + 1024+ 起步,无需 lanczos upscale
+
+
 
 ## 切换到真实平台
 
