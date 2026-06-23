@@ -163,9 +163,9 @@ class ClaudeProvider(LLMProvider):
         """
         kwargs = self._build_kwargs(messages, system, max_tokens, temperature, tools)
 
-        # Step 1: 拿到 stream context manager — 这一步失败可重试
+        # Step 1: 拿到 stream — 这一步失败可重试
         try:
-            cm = await self._open_stream_with_retry(kwargs)
+            stream, cm = await self._open_stream_with_retry(kwargs)
         except asyncio.TimeoutError:
             logger.error("claude.stream open timeout after %.1fs", self.timeout)
             yield StreamEvent(type="error", error=f"open_timeout: {self.timeout}s")
@@ -189,7 +189,7 @@ class ClaudeProvider(LLMProvider):
 
             try:
                 async for event in aiter_with_idle_timeout(
-                    cm, idle_timeout=self.idle_timeout, op_name="claude.stream"
+                    stream, idle_timeout=self.idle_timeout, op_name="claude.stream"
                 ):
                     et = getattr(event, "type", "")
 
@@ -265,18 +265,19 @@ class ClaudeProvider(LLMProvider):
             except Exception:
                 pass
 
-    async def _open_stream_with_retry(self, kwargs: dict) -> Any:
-        """打开 stream context manager — 失败按指数退避重试
+    async def _open_stream_with_retry(self, kwargs: dict) -> tuple[Any, Any]:
+        """打开 stream — 失败按指数退避重试
 
-        Anthropic SDK 的 `messages.stream()` 返回 async context manager，
-        真正发起 HTTP 请求是在 `__aenter__` 阶段。我们对 __aenter__ 包一层
-        超时 + 重试。
+        anthropic SDK 0.111+: `messages.stream()` 返回 AsyncMessageStreamManager
+        (async context manager),__aenter__ 才真正发起 HTTP,返回 AsyncMessageStream
+        (有 __anext__ 的 async iterator)。我们 enter 阶段包超时,返回 (stream, cm),
+        stream 用于迭代,cm 用于最后 close。
         """
-        async def _do_open() -> Any:
+        async def _do_open() -> tuple[Any, Any]:
             cm = self._client.messages.stream(**kwargs)
             async with asyncio.timeout(self.timeout):
-                await cm.__aenter__()
-            return cm
+                stream = await cm.__aenter__()
+            return stream, cm
 
         return await call_with_retry(
             _do_open,
