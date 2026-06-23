@@ -511,6 +511,76 @@ Step 5: 每个 Loop 结束我汇报:
 - ✅ Mock 默认开启,生产改 `TTS_PROVIDER=volcengine` 即可
 - ⚠️ ffmpeg 是运行依赖(系统包,不是 pip);Dockerfile 需 `apt-get install ffmpeg`(Loop 5c 之后再说)
 
+### 9.2 Phase 2 Loop 5c 案例:Voice API 端点 + 生产开关
+
+**目标**:让前端能调语音 — 暴露 `/voice/tts/synthesize` + `/voice/stt/transcribe`,Mock/Volcengine 一键切换。
+
+**实现**:
+- `app/voice/factory.py` — `get_tts_provider(settings)` / `get_stt_provider(settings)`
+  - TTS 默认包 `TTSCache`(降本),STT 不包(每次输入不同,缓存无意义)
+  - 火山模式但缺凭据 → `ValueError`,友好提示
+- `app/api/voice.py` — 两个端点
+  - TTS: `Response(audio_bytes, media_type=audio/mpeg|ogg|wav)`
+  - STT: audio base64 字符串 → JSON `{text, language}`
+- `app/main.py` — `app.include_router(voice_router)`
+- `tests/test_voice_api.py` — 18 测试(factory + 端点 + 校验 + cache hit + 错误)
+
+**API 形状(已实测 curl 验证)**:
+```
+POST /voice/tts/synthesize
+{ "text": "你好", "format": "mp3"|"wav"|"opus" }
+→ 200 audio/*  (ID3 / OggS / RIFF 头)
+
+POST /voice/stt/transcribe
+{ "audio": "<base64>", "format": "mp3", "language": "zh-CN" }
+→ 200 { "text": "...", "language": "zh-CN" }
+
+空 text → 422 (Pydantic min_length=1)
+缺 audio 字段 → 422
+Provider 抛错 → 500 (to_http_exception 统一)
+```
+
+**Loop 5c 关键决策**:
+- **TTS 工厂返回 TTSCache,STT 工厂返回裸 provider**:语义对齐 — TTS 是"可缓存的重复调用",STT 是"每次不同"
+- **STT audio 用 base64 字符串而非 bytes**:JSON 不能装二进制,base64 字符串前端易生成
+- **FastAPI prefix `/voice`**:一组端点统一前缀,跟 `/chat` 平行,文档自动分组
+- **`X-Audio-Format` 自定义响应头**:调试时一眼看出是 mp3/opus/wav,不用下载检查 magic bytes
+
+**基线变化**:173 → 191 测试(+18),全部通过,71s。
+
+**实测 smoke**(uvicorn 启动 → curl):
+```
+TTS MP3 → 200, 40 bytes, audio/mpeg, ID3 头 ✓
+TTS Opus → 200, 63 bytes, audio/ogg, OggS 头 ✓
+STT → 200, {"text":"用户说了什么(短音频 ...)"}  ✓
+空 text → 422 with Pydantic detail  ✓
+```
+
+**Review Checkpoint 总结**:
+- ✅ Factory 模式让 LLM/Embedding/Memory/Voice 全部统一 — 改 `.env` 一键切生产
+- ✅ Pydantic 422 自动校验,比手写 if 健壮
+- ✅ Mock 默认 + 火山 fallback 友好错误信息
+- ⚠️ 进程内 LRU cache 跨 worker 不共享(多 uvicorn worker 时命中率下降)— Loop 5d 可选接 Redis
+- ⚠️ 火山 STT body 格式是基于公开文档推断的,真实 key 跑通才算"绿灯" — 等用户拿真 key 集成测试
+
+### 9.3 Phase 2 完整路径回顾
+
+```
+Day 1-7 (Phase 1): LLM/Agent/Memory/Evals  → 109 测试,9 轮迭代
+Loop 4 (Qdrant 向量库)                    → 165 → 173 测试
+Loop 5a (Voice Protocol + Mock)           → 154 → 154 测试 (纯加法,0 改动)
+Loop 5b (火山引擎真实 API)                 → 154 → 173 测试 (+19)
+Loop 5c (API 端点 + 生产开关)              → 173 → 191 测试 (+18)
+```
+
+**Phase 2 完整产出**:
+- ✅ Qdrant 语义记忆(可切)
+- ✅ 火山引擎 TTS / STT(可切)
+- ✅ TTS 缓存(LRU 降本)
+- ✅ MP3 → Opus 本地转换
+- ✅ Voice API 端点(/voice/tts/synthesize, /voice/stt/transcribe)
+- ✅ 全链路生产开关(改 .env 即可)
+
 ---
 
 ## 十、给未来的自己
