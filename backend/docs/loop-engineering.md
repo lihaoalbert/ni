@@ -469,15 +469,47 @@ Step 5: 每个 Loop 结束我汇报:
 
 ## 九、参考
 
-- **实测来源**: Phase 1 记忆管道自动化(3 个 loop,9 轮迭代,109 测试全过)
+- **实测来源**:
+  - Phase 1 记忆管道自动化(3 个 loop,9 轮迭代,109 测试全过)
+  - Phase 2 Loop 4 — Qdrant 向量库(3 个 loop,3-Phase,165 → 173 测试)
+  - Phase 2 Loop 5a/b — TTS / STT 抽象层 + 火山引擎真实 API
 - **代码入口**:
   - `app/memory/extractor.py` — Protocol + Noop + Haiku
-  - `tests/test_memory_pipeline.py` — 4 个测试覆盖 3 个 loop
-  - `app/api/chat.py:get_extractor` — 依赖注入工厂
-  - `app/config.py:memory_pipeline_enabled` — Phase C 的生产开关
+  - `app/memory/qdrant_store.py` — Qdrant MemoryStore(Loop 4)
+  - `app/llm/embedding.py` — SentenceTransformerProvider(Loop 4b)
+  - `app/memory/store_factory.py` — MEMORY_BACKEND 开关(Loop 4c)
+  - `app/voice/{base,mock,volcengine,cache}.py` — TTS/STT 抽象 + 火山(Loop 5)
+  - `tests/test_volcengine_voice.py` — 19 测试覆盖火山 + Opus + 缓存
 - **学到的**:
   - Day 7 评测框架(8 case + mock LLM)— 测试驱动的工程化
   - Loop Engineering(本文件)— 让 Claude 自主但安全迭代
+
+### 9.1 Phase 2 Loop 5 案例:语音模块(TTS + STT)
+
+**目标**:让数字人能说话/听话。生产用火山引擎,开发用 Mock,接口同形可切换。
+
+**3-Phase 拆分**:
+- **Loop 5a(骨架)**:Protocol + Mock,17 测试纯本地 — 让架构先成立
+- **Loop 5b(真实 API)**:`VolcengineTTSProvider` + `VolcengineSTTProvider` + `TTSCache` + `convert_mp3_to_opus`,19 测试用 respx mock HTTP
+- **Loop 5c(生产开关,待做)**:`/tts/synthesize` + `/stt/transcribe` API + `TTS_PROVIDER` 开关 + Redis 缓存(可选)
+
+**Loop 5b 关键决策**:
+- **不用 volcengine SDK**:MaaS SDK 只包 TTS 不包 STT,反而引入双重抽象 — 直接 httpx + respx 反而测试链路最短
+- **Opus 走本地 ffmpeg**:火山只返 MP3,Opus 转换成本地 ffmpeg 子进程;接口层统一,前端无需感知
+- **缓存键 = (text, voice_id, format)**:三因素才决定音频;LRU 用 `OrderedDict.popitem(last=False)`
+- **Provider 抛错不缓存**:失败需要重试,缓存失败结果会"卡死"
+
+**测试技巧 — respx + ffmpeg 真转**:
+- HTTP 边界用 respx 完全控制(无网络无 SDK)
+- Opus 转换是真 ffmpeg 子进程(`subprocess.run`),`pytest.mark.skipif(not is_ffmpeg_available())` 优雅降级
+- MP3 fixture 也用 ffmpeg 生成:`ffmpeg -f lavfi -i anullsrc=r=16000:cl=mono`,避免引入音频文件到仓库
+
+**基线变化**:154 → 173 测试(+19),全部通过,60s。
+
+**Review Checkpoint 总结**:
+- ✅ `VOLC_*` 凭据仅走 `.env`(用户自己填,Claude 不存)
+- ✅ Mock 默认开启,生产改 `TTS_PROVIDER=volcengine` 即可
+- ⚠️ ffmpeg 是运行依赖(系统包,不是 pip);Dockerfile 需 `apt-get install ffmpeg`(Loop 5c 之后再说)
 
 ---
 

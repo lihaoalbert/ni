@@ -61,6 +61,23 @@ class Settings(BaseSettings):
     # Cache
     redis_url: str = "redis://localhost:6379/0"
 
+    # Phase 2 Loop 5 — 语音 Provider 开关
+    #   mock: 进程内 Mock,无外部依赖(默认,CI/单测/本地开发)
+    #   volcengine: 火山引擎真实 API
+    tts_provider: Literal["mock", "volcengine"] = "mock"
+    stt_provider: Literal["mock", "volcengine"] = "mock"
+
+    # 火山引擎语音配置
+    volc_app_id: str = ""
+    volc_access_key: str = ""
+    volc_secret_key: str = ""
+    volc_tts_endpoint: str = "https://openspeech.bytedance.com/api/v1/tts"
+    volc_stt_endpoint: str = "https://openspeech.bytedance.com/api/v1/asr"
+    volc_cluster: str = "volcano_tts"
+    volc_default_voice: str = "zh_female_qingxin"
+    # TTS 缓存大小(进程内 dict LRU)
+    tts_cache_max_size: int = 128
+
 
 @lru_cache
 def get_settings() -> Settings:

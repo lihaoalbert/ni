@@ -17,6 +17,7 @@ dependencies = [
     "qdrant-client==1.12.0",  # pin to match local Qdrant binary 1.12.4
     "sentence-transformers>=3.0.0",
     "httpx>=0.28.0",
+    "respx>=0.23.0",  # httpx mock for voice provider tests
     "tenacity>=9.0.0",
 ]
 
