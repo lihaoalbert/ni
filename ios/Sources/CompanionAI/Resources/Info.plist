@@ -33,6 +33,10 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>CompanionAI 需要麦克风权限来识别您的语音消息</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>CompanionAI 需要语音识别权限把您说的话转成文字</string>
     <key>CHAT_BASE_URL</key>
     <string>http://localhost:8000</string>
     <key>PLATFORM_BASE_URL</key>

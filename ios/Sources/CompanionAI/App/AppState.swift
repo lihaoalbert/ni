@@ -1,6 +1,7 @@
-// 全局 App 状态 — token 存储 + 路由 + 持久化层 + 端上 LLM
+// 全局 App 状态 — token 存储 + 路由 + 持久化层 + 端上 LLM + 端上语音
 // Loop 7: 持有 Database + MemoryStore,App 全程单例,ChatViewModel 通过这里注入
 // Loop 8: 持有 OnDeviceLLMService + FactExtractor + SummaryGenerator;ChatViewModel 通过工厂注入
+// Loop 9: 持有 SpeechService(iOS only);ChatViewModel 拿到引用后接入按住说话 + 自动 TTS
 import Foundation
 import Observation
 import CompanionCore
@@ -28,6 +29,9 @@ public final class AppState {
     public let llm: OnDeviceLLMService?
     public let factExtractor: FactExtractor?
     public let summaryGenerator: SummaryGenerator?
+
+    // Loop 9: 端上语音服务 — iOS 模拟器与真机都可用(模拟器 mic 拾静音,API 路径能验证)
+    public let speech: SpeechServiceProtocol?
 
     public init(api: APIClient = APIClient()) {
         self.api = api
@@ -68,6 +72,13 @@ public final class AppState {
         self.factExtractor = llmService.map { FactExtractor(llm: $0) }
         self.summaryGenerator = llmService.map { SummaryGenerator(llm: $0) }
 
+        // Loop 9: 端上语音(iOS only) — 模拟器也能跑(TTS 一定可用,STT 取决于模拟器是否配 mic)
+        #if os(iOS)
+        self.speech = AppleSpeechService()
+        #else
+        self.speech = nil
+        #endif
+
         if let data = UserDefaults.standard.data(forKey: tokenKey),
            let t = try? JSONDecoder().decode(AuthToken.self, from: data) {
             self.token = t
@@ -79,6 +90,14 @@ public final class AppState {
     public func warmupLLM(progressHandler: (@Sendable (Double) -> Void)? = nil) async {
         guard let llm else { return }
         try? await llm.load(progressHandler: progressHandler)
+    }
+
+    /// Loop 9: 进聊天页时调用 — 申请语音权限(mic + 语音识别);已授权 / 已拒绝过则 no-op
+    public func requestSpeechPermissionsIfNeeded() async {
+        guard let speech else { return }
+        if speech.permissionStatus == .undetermined {
+            _ = await speech.requestPermissionsIfNeeded()
+        }
     }
 
     public func login(email: String, password: String) async throws {
@@ -150,7 +169,8 @@ public final class AppState {
             api: api,
             memory: memory,
             factExtractor: factExtractor,
-            summaryGenerator: summaryGenerator
+            summaryGenerator: summaryGenerator,
+            speech: speech
         )
     }
 

@@ -3,6 +3,10 @@
 //         init 时 hydrateWorking 把历史重新灌进内存,实现"刷新不丢"
 // Loop 8: 接入端上 LLM(可选)— 收到 assistant 回复后异步调 FactExtractor;
 //         每 10 轮调一次 SummaryGenerator;UI 用 isAutoExtracting 显示"自动记住"提示
+// Loop 9: 接入端上语音(SpeechServiceProtocol 可选)—
+//   - 按住 mic 走 startListening() 拿 transcript stream,松手 stopListeningAndSend() 自动 send
+//   - assistant 回复完成后自动 speak(_:)(ttsEnabled 关闭时不播)
+//   - 暴露 speechState / currentListeningTranscript / ttsEnabled 给 UI
 import Foundation
 import Observation
 
@@ -21,6 +25,12 @@ public final class ChatViewModel {
     public private(set) var messages: [ChatMessage] = []
     public private(set) var currentStreamingText: String = ""
     public private(set) var isAutoExtracting: Bool = false
+
+    // Loop 9: 语音状态
+    public private(set) var speechState: SpeechState = .idle
+    public private(set) var currentListeningTranscript: String = ""
+    public var ttsEnabled: Bool = true
+
     public let characterID: String
     public let characterName: String
     public let userID: String
@@ -30,8 +40,10 @@ public final class ChatViewModel {
     private let memory: MemoryStore
     private let factExtractor: FactExtractorProtocol?
     private let summaryGenerator: SummaryGeneratorProtocol?
+    private let speech: SpeechServiceProtocol?
     private var streamTask: Task<Void, Never>?
     private var extractionTask: Task<Void, Never>?
+    private var listeningTask: Task<Void, Never>?
 
     /// 每 N 条 user 消息触发一次 summary(默认 10 条 ≈ 10 轮)
     private let summaryTriggerMessageCount = 10
@@ -44,7 +56,8 @@ public final class ChatViewModel {
         api: APIClientProtocol,
         memory: MemoryStore,
         factExtractor: FactExtractorProtocol? = nil,
-        summaryGenerator: SummaryGeneratorProtocol? = nil
+        summaryGenerator: SummaryGeneratorProtocol? = nil,
+        speech: SpeechServiceProtocol? = nil
     ) {
         self.characterID = characterID
         self.characterName = characterName
@@ -54,6 +67,7 @@ public final class ChatViewModel {
         self.memory = memory
         self.factExtractor = factExtractor
         self.summaryGenerator = summaryGenerator
+        self.speech = speech
         hydrateFromMemory()
     }
 
@@ -161,8 +175,9 @@ public final class ChatViewModel {
     }
 
     private func commitStreamedMessage() {
-        if !currentStreamingText.isEmpty {
-            let assistantMessage = ChatMessage(role: .assistant, text: currentStreamingText)
+        let text = currentStreamingText
+        if !text.isEmpty {
+            let assistantMessage = ChatMessage(role: .assistant, text: text)
             messages.append(assistantMessage)
             try? memory.appendAndPersist(conversationId: conversationID, message: assistantMessage)
             currentStreamingText = ""
@@ -170,8 +185,115 @@ public final class ChatViewModel {
             // Loop 8: 收到 assistant 回复后异步触发抽取(LLM 未加载则跳过)
             triggerAutoMemoryExtraction()
             maybeTriggerSummary()
+
+            // Loop 9: TTS 自动朗读(若启用 + speech 可用 + 没在监听)
+            if ttsEnabled, speech != nil, !isListening {
+                speak(text)
+            }
         }
         status = .done
+    }
+
+    // MARK: - Loop 9: 语音输入(TTS / STT)
+
+    /// 是否在监听(任何 listening / recognizing 状态)
+    public var isListening: Bool {
+        if case .listening = speechState { return true }
+        if case .recognizing = speechState { return true }
+        return false
+    }
+
+    /// 是否正在 TTS 朗读
+    public var isSpeaking: Bool {
+        if case .speaking = speechState { return true }
+        return false
+    }
+
+    /// 请求权限(若未授权)— 一次申请 mic + 语音识别
+    public func requestSpeechPermissions() async {
+        guard let speech else { return }
+        _ = await speech.requestPermissionsIfNeeded()
+        speechState = speech.state
+    }
+
+    /// 开始监听 — 申请权限 + 启动 AVAudioEngine + 拿 transcript stream
+    /// 持续把 partial transcript 写到 currentListeningTranscript(UI 直接 @Observable 渲染)
+    public func startListening() async {
+        guard let speech else { return }
+        // 已经在听就忽略
+        if isListening { return }
+        // 先申请权限(若还没)
+        if speech.permissionStatus != .granted {
+            let status = await speech.requestPermissionsIfNeeded()
+            if status != .granted {
+                speechState = .error("需要麦克风 + 语音识别权限")
+                return
+            }
+        }
+        do {
+            let stream = try await speech.startListening()
+            // 同步 service 的状态(.listening)到 ViewModel
+            speechState = speech.state
+            currentListeningTranscript = ""
+            listeningTask = Task { [weak self] in
+                for await partial in stream {
+                    await MainActor.run {
+                        self?.currentListeningTranscript = partial
+                        self?.speechState = .recognizing(partial)
+                    }
+                }
+            }
+        } catch {
+            speechState = .error(error.localizedDescription)
+        }
+    }
+
+    /// 停止监听并发送(松手调用)— transcript 喂给 send
+    public func stopListeningAndSend() async {
+        guard let speech else { return }
+        guard isListening else { return }
+        speech.stopListening()
+        listeningTask?.cancel()
+        listeningTask = nil
+
+        let text = currentListeningTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        currentListeningTranscript = ""
+        speechState = speech.state
+
+        // 空 transcript(用户按了没说话)不发送
+        guard !text.isEmpty else { return }
+        send(text)
+    }
+
+    /// 取消监听(丢弃 transcript)— 拖动取消手势调用
+    public func cancelListening() {
+        guard let speech else { return }
+        speech.stopListening()
+        listeningTask?.cancel()
+        listeningTask = nil
+        currentListeningTranscript = ""
+        speechState = .idle
+    }
+
+    /// TTS 朗读文字(单条)— 在播就停旧的
+    public func speak(_ text: String) {
+        guard let speech else { return }
+        guard ttsEnabled, !text.isEmpty else { return }
+        speech.speak(text)
+        speechState = speech.state
+    }
+
+    /// 立刻停 TTS
+    public func stopSpeaking() {
+        guard let speech else { return }
+        speech.stopSpeaking()
+        speechState = speech.state
+    }
+
+    /// 切换 TTS 开关 — 关掉时如果正在播也停
+    public func setTTSEnabled(_ enabled: Bool) {
+        ttsEnabled = enabled
+        if !enabled { stopSpeaking() }
     }
 
     // MARK: - Loop 8: 自动抽取 + 摘要生成

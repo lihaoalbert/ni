@@ -1,8 +1,9 @@
 # iOS App — CompanionAI
 
-> Phase 3 Loop 8: iOS 17+ SwiftUI App + CompanionCore 库 + SQLite 4 层记忆 + 端上 LLM 自动抽取。
-> 文字聊天,流式响应,集成 ips-mock 拉取数字人列表,聊天历史与长期事实持久化到端上 SQLite,
-> 登录后异步 warmup 端上 Qwen3-1.7B-Instruct(MLX 4-bit)做 fact 抽取 + 滚动摘要生成。
+> Phase 3 Loop 9: iOS 17+ SwiftUI App + CompanionCore 库 + SQLite 4 层记忆 + 端上 LLM 自动抽取 + 端上语音(TTS + STT)。
+> 文字/语音聊天,流式响应,集成 ips-mock 拉取数字人列表,聊天历史与长期事实持久化到端上 SQLite,
+> 登录后异步 warmup 端上 Qwen3-1.7B-Instruct(MLX 4-bit)做 fact 抽取 + 滚动摘要生成,
+> 进聊天页申请麦克风 + 语音识别权限,按住 mic 说话松手发送,assistant 回复自动 TTS 朗读。
 
 ## 启动
 
@@ -59,7 +60,7 @@ cd /Users/app/ni/ios
 swift test
 ```
 
-68 个测试(SSEReader × 10, APIClient × 5, UTF8Boundary × 4, Database × 6, Repository × 13, MemoryStore × 9, ChatViewModel × 4, FactExtractor × 6, SummaryGenerator × 3, ChatViewModel+LLM × 5, OnDeviceLLMService × 3),全绿。
+88 个测试(SSEReader × 10, APIClient × 5, UTF8Boundary × 4, Database × 6, Repository × 13, MemoryStore × 9, ChatViewModel × 4, FactExtractor × 6, SummaryGenerator × 3, ChatViewModel+LLM × 5, OnDeviceLLMService × 3, SpeechService × 9, ChatViewModel+Voice × 11),全绿。
 
 ## 项目结构
 
@@ -67,21 +68,22 @@ swift test
 ios/
 ├── Package.swift              SwiftPM,iOS 17+ / macOS 14+(测试用)+ SQLite.swift 依赖
 ├── Sources/
-│   ├── CompanionCore/         库(Foundation + 模型 + 网络 + 存储 + 记忆),KMP 复用候选
+│   ├── CompanionCore/         库(Foundation + 模型 + 网络 + 存储 + 记忆 + 端上 LLM + 端上语音),KMP 复用候选
 │   │   ├── Models/            IPListItem / Character / ChatMessage / SSEEvent / Auth
 │   │   ├── Networking/        APIClient (AsyncThrowingStream) + SSEReader + UTF8Boundary
 │   │   ├── Storage/           Database + Conversation/Message/Fact/Summary Repository
 │   │   ├── Memory/            MemoryStore protocol + DefaultMemoryStore + InMemoryMemoryStore
 │   │   ├── LLM/               OnDeviceLLMService (MLX) + FactExtractor + SummaryGenerator
+│   │   ├── Audio/             SpeechServiceProtocol + AppleSpeechService + AudioSessionManager + SpeechState(iOS only)
 │   │   ├── ViewModels/        IPListViewModel + ChatViewModel (@Observable)
 │   │   └── Config/            AppConfig (后端地址 + local user_id)
 │   └── CompanionAI/           可执行 App(SwiftUI)
 │       ├── App/               CompanionAIApp (@main) + AppState + RootView
-│       ├── Resources/         Info.plist(CHAT_BASE_URL / PLATFORM_BASE_URL / ATS)
+│       ├── Resources/         Info.plist(CHAT_BASE_URL / PLATFORM_BASE_URL / ATS / 麦克风 / 语音识别)
 │       └── Features/
 │           ├── Login/         邮箱密码登录(默认填 test@ni.app / test1234)
-│           ├── IPList/        卡片列表 + 缩略图
-│           └── Chat/          消息气泡 + 流式打字机 + 长按 user 消息"记住这件事"
+│           ├── IPList/        卡片列表 + 缩略图 + LLM 加载状态条
+│           └── Chat/          消息气泡 + 流式打字机 + 长按 user 消息"记住这件事" + 按住 mic 说话 + 朗读按钮 + 监听中浮层
 └── Tests/
     └── CompanionCoreTests/    SSEReader / APIClient / UTF8Boundary / Database / Repository / MemoryStore / ChatViewModel 测试
 ```
@@ -163,10 +165,50 @@ public protocol OnDeviceLLMServiceProtocol: Sendable {
 
 **去重**:`saveFact` 前用 `listFacts(userId:, category: nil)` 查重,`content` 相同则跳过(防止同一事实重复入库)。
 
+### Loop 9:端上 TTS + STT(Apple 原生)
+
+完整语音对话:**按住 mic 说话 → 实时转写 → 松手发送 → assistant 回复 → 自动朗读**。
+
+| 组件 | 技术 | 说明 |
+|---|---|---|
+| TTS | `AVSpeechSynthesizer` + `AVSpeechUtterance` | 中文用 system "Tingting" 音;`Character.voiceId` 字段已预留,Loop 10 接火山引擎 |
+| STT | `SFSpeechRecognizer` + `SFSpeechAudioBufferRecognitionRequest` | locale = zh-CN;`shouldReportPartialResults = true` 实时 partial |
+| 音频采集 | `AVAudioEngine.inputNode` tap | 1024 buffer;同时算 RMS 拿 dB 计量 |
+| 音频会话 | `AudioSessionManager`(ref-count) | 分类 `.playAndRecord` + `.defaultToSpeaker` + `.allowBluetooth` + `.duckOthers` |
+| 中断处理 | `AVAudioSession.interruptionNotification` | 电话 / Siri 打断立即停 STT + TTS |
+
+**协议化注入**:
+```swift
+public protocol SpeechServiceProtocol: AnyObject, Sendable {
+    var state: SpeechState { get }
+    var permissionStatus: SpeechPermissionStatus { get }
+    var audioLevel: Float { get }  // 0-1 RMS,UI 做 dB 计量
+    func requestPermissionsIfNeeded() async -> SpeechPermissionStatus
+    func startListening() async throws -> AsyncStream<String>  // 每次新建
+    func stopListening()
+    func speak(_ text: String)
+    func stopSpeaking()
+}
+```
+
+**按 HoldButtonStyle 实现"按住说话"**:`ButtonStyle.makeBody` 暴露 `configuration.isPressed` 给外层 `@State`,iOS 17+ 推荐做法,比 `DragGesture` 可靠。`onChange(of: isPressed)` 切换 start / stop。
+
+**STT 用 AsyncStream 不用 stored property**:`startListening()` 每次新建 `AsyncStream<String>`,`for try await partial in stream` 消费;`stopListening()` 自动 `continuation.finish()`。避免 transient transcript 污染 @Observable,也避开 Sendable 复杂化。
+
+**TTS 自动播 + 防重叠**:`commitStreamedMessage()` 末尾若 `ttsEnabled && speech != nil && !isListening` 就 `speak(text)`;`speak` 内部检查同 text 不重播,异 text 先 stop 旧的再播新的。用户点 assistant 消息右侧 `speaker.wave.2` 按钮可手动重播。
+
+**音频会话 ref-count**:一个 `AudioSessionManager` 单例,`enter(.playAndRecord)` / `leave(.playAndRecord)`;多个组件(STT + TTS)共享,最后一个 `leave` 触发真正的 deactivate,避免和系统音乐冲突。
+
+**权限申请时机**:`RootView.task` 在进 `.chat` 路由时调一次 `requestSpeechPermissionsIfNeeded()`;已授权 / 已拒绝过则 no-op。失败弹 alert,引导去 `UIApplication.openSettingsURLString`。
+
+**已知行为**:
+- 模拟器 mic 拾静音,STT 路径走得通(权限 / 状态机 / transcript stream 验证)但转写为空;真机用耳机体验最佳
+- 60s 单次录音上限,防止用户忘了松手
+- 接电话 / Siri 中断自动停 STT + TTS;恢复不自动续(用户重按 mic)
+
 ## 下一步
 
-- Loop 9: 端上 TTS/STT(sherpa-onnx)
-- Loop 10: PIPL 合规 + 跨设备同步 + sqlite-vec 真向量检索
+- Loop 10: PIPL 合规 + 跨设备同步 + sqlite-vec 真向量检索 + 火山引擎 TTS(用 `Character.voiceId` 字段)
 - Loop 11: 数字人形象(Path A: MuseTalk + 2K PNG)
 
 ## 已知限制
@@ -175,9 +217,12 @@ public protocol OnDeviceLLMServiceProtocol: Sendable {
 - 真机调试需要 Apple Developer 账号($99/年)+ 后端暴露到局域网
 - 模拟器上 iOS Data Protection 是 no-op(`xattr` 不显示 protection class),真机才会生效
 - **端上 LLM 只能在真机跑**:MLX 在 iOS 模拟器上初始化 Metal device 时 abort(`MTLSimDevice.architecture()` 返回 null,已知 MLX issue)— `AppState` 用 `!targetEnvironment(simulator)` 守门,模拟器上 `llm` 为 nil,IPList 顶栏不显示 banner,ChatView 不会触发抽取
+- **端上 STT 模拟器 mic 拾静音**:API 路径走得通(权限 / 状态机 / transcript stream 验证),但转写为空;真机用耳机体验最佳
+- 模拟器上 `AudioSessionManager` 仍能 enter/leave ref,但不真正激活 AVAudioSession
 - 模型未 ready 时发消息不会失败,只是不会触发 fact 抽取 + summary;ChatView 顶部 badge 提示当前状态
 - iCloud 跨设备同步 Loop 10 PIPL 合规阶段做
 - `semanticSearch` 当前是字符串包含匹配,Loop 10 替换为 sqlite-vec 真向量检索
+- TTS 当前用系统 "Tingting" 中文女声;`Character.voiceId` 字段已预留,Loop 10 接火山引擎做角色专属音色
 
 ## 部署到模拟器
 
