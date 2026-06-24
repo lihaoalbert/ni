@@ -1,9 +1,11 @@
 # iOS App — CompanionAI
 
-> Phase 3 Loop 9: iOS 17+ SwiftUI App + CompanionCore 库 + SQLite 4 层记忆 + 端上 LLM 自动抽取 + 端上语音(TTS + STT)。
+> Phase 3 Loop 10: iOS 17+ SwiftUI App + CompanionCore 库 + SQLite 4 层记忆 + 端上 LLM 自动抽取 + 端上语音
+> + **真向量检索(sqlite-vec + Apple NLEmbedding)** + **火山引擎 TTS 流式播放**。
 > 文字/语音聊天,流式响应,集成 ips-mock 拉取数字人列表,聊天历史与长期事实持久化到端上 SQLite,
 > 登录后异步 warmup 端上 Qwen3-1.7B-Instruct(MLX 4-bit)做 fact 抽取 + 滚动摘要生成,
-> 进聊天页申请麦克风 + 语音识别权限,按住 mic 说话松手发送,assistant 回复自动 TTS 朗读。
+> 进聊天页申请麦克风 + 语音识别权限,按住 mic 说话松手发送,assistant 回复自动 TTS 朗读
+> (character 有 voiceId → 后端火山引擎流式 MP3,无 voiceId → 系统 "Tingting" 中文女声)。
 
 ## 启动
 
@@ -60,21 +62,23 @@ cd /Users/app/ni/ios
 swift test
 ```
 
-88 个测试(SSEReader × 10, APIClient × 5, UTF8Boundary × 4, Database × 6, Repository × 13, MemoryStore × 9, ChatViewModel × 4, FactExtractor × 6, SummaryGenerator × 3, ChatViewModel+LLM × 5, OnDeviceLLMService × 3, SpeechService × 9, ChatViewModel+Voice × 11),全绿。
+124 个测试(SSEReader × 10, APIClient × 5, UTF8Boundary × 4, Database × 6, Repository × 13, MemoryStore × 9, ChatViewModel × 4, FactExtractor × 6, SummaryGenerator × 3, ChatViewModel+LLM × 5, OnDeviceLLMService × 3, SpeechService × 9, ChatViewModel+Voice × 14, EmbeddingService × 5, AVecSearch × 7, VolcanoTTSClient × 5, StreamingSpeechService × 11),全绿。
 
 ## 项目结构
 
 ```
 ios/
-├── Package.swift              SwiftPM,iOS 17+ / macOS 14+(测试用)+ SQLite.swift 依赖
+├── Package.swift              SwiftPM,iOS 17+ / macOS 14+(测试用)+ SQLite.swift + CSQLiteVec 依赖
 ├── Sources/
+│   ├── CSQLiteVec/            Loop 10.1:sqlite-vec v0.1.9 C 扩展(vendored amalgamation)
 │   ├── CompanionCore/         库(Foundation + 模型 + 网络 + 存储 + 记忆 + 端上 LLM + 端上语音),KMP 复用候选
 │   │   ├── Models/            IPListItem / Character / ChatMessage / SSEEvent / Auth
 │   │   ├── Networking/        APIClient (AsyncThrowingStream) + SSEReader + UTF8Boundary
-│   │   ├── Storage/           Database + Conversation/Message/Fact/Summary Repository
+│   │   ├── Storage/           Database + Conversation/Message/Fact/Summary Repository + facts_vec (vec0)
 │   │   ├── Memory/            MemoryStore protocol + DefaultMemoryStore + InMemoryMemoryStore
+│   │   ├── Vector/            Loop 10.1:EmbeddingServiceProtocol + NLEmbeddingService + MockEmbeddingService
 │   │   ├── LLM/               OnDeviceLLMService (MLX) + FactExtractor + SummaryGenerator
-│   │   ├── Audio/             SpeechServiceProtocol + AppleSpeechService + AudioSessionManager + SpeechState(iOS only)
+│   │   ├── Audio/             SpeechServiceProtocol + AppleSpeechService + StreamingSpeechService (Loop 10.3) + VolcanoTTSClient + AudioSessionManager + SpeechState(iOS only)
 │   │   ├── ViewModels/        IPListViewModel + ChatViewModel (@Observable)
 │   │   └── Config/            AppConfig (后端地址 + local user_id)
 │   └── CompanionAI/           可执行 App(SwiftUI)
@@ -85,7 +89,7 @@ ios/
 │           ├── IPList/        卡片列表 + 缩略图 + LLM 加载状态条
 │           └── Chat/          消息气泡 + 流式打字机 + 长按 user 消息"记住这件事" + 按住 mic 说话 + 朗读按钮 + 监听中浮层
 └── Tests/
-    └── CompanionCoreTests/    SSEReader / APIClient / UTF8Boundary / Database / Repository / MemoryStore / ChatViewModel 测试
+    └── CompanionCoreTests/    SSEReader / APIClient / UTF8Boundary / Database / Repository / MemoryStore / ChatViewModel / EmbeddingService / AVecSearch / VolcanoTTSClient / StreamingSpeechService 测试
 ```
 
 ## 关键设计
@@ -171,7 +175,7 @@ public protocol OnDeviceLLMServiceProtocol: Sendable {
 
 | 组件 | 技术 | 说明 |
 |---|---|---|
-| TTS | `AVSpeechSynthesizer` + `AVSpeechUtterance` | 中文用 system "Tingting" 音;`Character.voiceId` 字段已预留,Loop 10 接火山引擎 |
+| TTS | `AVSpeechSynthesizer` + `AVSpeechUtterance` | 中文用 system "Tingting" 音;`Character.voiceId` 字段已预留,Loop 10.3 接火山引擎 |
 | STT | `SFSpeechRecognizer` + `SFSpeechAudioBufferRecognitionRequest` | locale = zh-CN;`shouldReportPartialResults = true` 实时 partial |
 | 音频采集 | `AVAudioEngine.inputNode` tap | 1024 buffer;同时算 RMS 拿 dB 计量 |
 | 音频会话 | `AudioSessionManager`(ref-count) | 分类 `.playAndRecord` + `.defaultToSpeaker` + `.allowBluetooth` + `.duckOthers` |
@@ -188,6 +192,8 @@ public protocol SpeechServiceProtocol: AnyObject, Sendable {
     func stopListening()
     func speak(_ text: String)
     func stopSpeaking()
+    // Loop 10.3:可选 voiceId speak — 有值走后端火山,默认走系统 TTS
+    func speak(_ text: String, voiceId: String?) async
 }
 ```
 
@@ -195,7 +201,11 @@ public protocol SpeechServiceProtocol: AnyObject, Sendable {
 
 **STT 用 AsyncStream 不用 stored property**:`startListening()` 每次新建 `AsyncStream<String>`,`for try await partial in stream` 消费;`stopListening()` 自动 `continuation.finish()`。避免 transient transcript 污染 @Observable,也避开 Sendable 复杂化。
 
-**TTS 自动播 + 防重叠**:`commitStreamedMessage()` 末尾若 `ttsEnabled && speech != nil && !isListening` 就 `speak(text)`;`speak` 内部检查同 text 不重播,异 text 先 stop 旧的再播新的。用户点 assistant 消息右侧 `speaker.wave.2` 按钮可手动重播。
+**TTS 自动播 + 防重叠**:`commitStreamedMessage()` 末尾若 `ttsEnabled && speech != nil && !isListening` 就分支:
+- character 有 `voiceId` → `Task { @MainActor in await self.speak(text, voiceId: voiceId) }`(走火山引擎)
+- 无 `voiceId` → 同步 `speak(text)`(走系统 AVSpeechSynthesizer)
+
+`speak(_:voiceId:)` 默认实现走系统 TTS,后向兼容 Loop 9。StreamingSpeechService 重写后调火山;`speak` 内部检查同 text 不重播,异 text 先 stop 旧的再播新的。用户点 assistant 消息右侧 `speaker.wave.2` 按钮可手动重播。
 
 **音频会话 ref-count**:一个 `AudioSessionManager` 单例,`enter(.playAndRecord)` / `leave(.playAndRecord)`;多个组件(STT + TTS)共享,最后一个 `leave` 触发真正的 deactivate,避免和系统音乐冲突。
 
@@ -206,10 +216,81 @@ public protocol SpeechServiceProtocol: AnyObject, Sendable {
 - 60s 单次录音上限,防止用户忘了松手
 - 接电话 / Siri 中断自动停 STT + TTS;恢复不自动续(用户重按 mic)
 
+### Loop 10.1:真向量检索(sqlite-vec + Apple NLEmbedding)
+
+`Loop 7` 的 `InMemoryMemoryStore` 字符串包含匹配,以及 `DefaultMemoryStore` 的 CJK 单字 substring scoring 都被替换为 **sqlite-vec vec0 KNN 检索**。Embedding 用 Apple `NLEmbedding`(端上、零网络、PIPL 友好)。
+
+| 组件 | 角色 |
+|---|---|
+| `CSQLiteVec` SwiftPM C target | sqlite-vec v0.1.9 amalgamation(vendored,~10k 行纯 C) |
+| `Database` | 启动 `sqlite3_vec_init(connection.handle)` 注册 vec0;schema v2 增 `facts_vec` 虚拟表 |
+| `EmbeddingServiceProtocol` | `embed(_:) async throws -> [Float]?` + `dimension: Int?` |
+| `NLEmbeddingService`(生产) | sentenceEmbedding → wordEmbedding → NLTokenizer average fallback |
+| `MockEmbeddingService`(测试) | FNV-1a hash → 8 维 Float32 固定向量,空文本返 nil |
+| `FactRepository.vectorSearch(userId:, queryEmbedding:, limit:)` | vec0 KNN + join 回 facts 表 |
+| `DefaultMemoryStore.semanticSearch` | 有 embeddingService → 调 vec0 KNN;无 → 退化到原 substring 兜底 |
+
+**sqlite-vec 接入方式**:SwiftPM C target + `publicHeadersPath: "include"` + `linkerSettings: [.linkedLibrary("sqlite3")]`。`Database` 启动时把 `Connection.handle`(`OpaquePointer`)rebind 到 `sqlite3 *` 调 `sqlite3_vec_init`。`#if canImport(AVFoundation)` 不需要 — 纯 C,Intel/ARM 模拟器都能编。
+
+**Schema 迁移 v1 → v2**:`PRAGMA user_version` 单调递增,启动检查 < 2 就跑 `migrateV2` 建 `facts_vec` 虚拟表(`embedding float[dim]`)。维度由 `embeddingService?.dimension` 决定 — nil 时不建表,降级回 substring。
+
+**Embedding 来源**:`NLEmbedding.sentenceEmbedding(for: .simplifiedChinese)`,维度由模型决定(实测 iOS 18 真机可用,iOS 17 视设备)。**模拟器 guard**:`#if os(iOS) && !targetEnvironment(simulator)` 才注入 `NLEmbeddingService`,模拟器 NLEmbedding 在 Metal 初始化时 abort,graceful degrade 到 substring 检索(测试可见 + 真机可体验)。
+
+**KNN 查询**:
+```sql
+SELECT f.*, v.distance
+FROM facts_vec v
+JOIN facts f ON f.id = v.fact_id
+WHERE v.embedding MATCH ? AND k = ? AND f.user_id = ?
+ORDER BY v.distance ASC;
+```
+- `?` 传 JSON 字符串(`[f0,f1,...,fN-1]`)
+- `k = ?` 限 top-K
+- 距离默认 L2 欧氏
+- 命中后 `touchAccess(factId:)` 更新 `access_count` / `last_accessed_at`(同 Loop 7 行为)
+
+**Fallback 链**:`semanticSearch` 调 vec0 KNN,无结果或 embedding 失败 → 原 substring scoring;两端都失败 → 空数组(同 Loop 7 行为)。
+
+**Save 异步落 vec**:`FactRepository.save(_:)` 同步写 `facts` 表,然后 `Task.detached(priority: .utility)` 异步算 embedding + 写 `facts_vec` 行;失败仅 print 不抛(主路径不阻塞)。
+
+### Loop 10.3:火山引擎 TTS 流式播放
+
+iOS 端 TTS 从系统 `AVSpeechSynthesizer` 切到**后端火山引擎流式 MP3 播放**。Character 有 `voiceId` 走火山,无 `voiceId` 仍走系统 TTS,失败 fallback。
+
+| 组件 | 角色 |
+|---|---|
+| `VolcanoTTSClient` | 调后端 `/voice/tts/synthesize` 拿音频 bytes;`VolcanoTTSRequest`(text / voiceId / format) |
+| `APIClient.synthesizeTTS(req:)` | 真实 `URLSession` 实现 + 协议方法,30s timeout,空响应 / 非 2xx 抛错 |
+| `StreamingSpeechService` | 组合 `VolcanoTTSClient` + `AVAudioEngine` / `AVAudioPlayerNode` + `AppleSpeechService` fallback |
+| `SpeechServiceProtocol.speak(_:voiceId:)` | 新增可选方法,默认实现调 `speak(_:)`(后向兼容 Loop 9) |
+| `ChatViewModel.characterVoiceId` | init 参数;`commitStreamedMessage` 自动分支 |
+| `AppState.makeChatViewModel(characterVoiceId:)` | 有值 → `StreamingSpeechService(api:fallback:)`,无 → 复用 `AppleSpeechService` |
+
+**播放流程**:
+1. `speak(text, voiceId:)` → 调 `ttsClient.synthesizeSync` 拿 MP3 bytes
+2. 写 `tmp` 文件 → `AVAudioFile(forReading:)` 解析 → `player.scheduleFile(_:at:)` → `player.play()`
+3. 完成后 `player.scheduleFile` completion callback 改 `state = .idle`
+
+**Fallback 链**(谁调谁不挂):
+- `speak(_:voiceId:)` `voiceId` 为空 → 直接调 `fallback?.speak(text)`(系统 TTS)
+- 后端调失败 / 5xx → `catch` 块 `fallback?.speak(text)`
+- `AVAudioFile` 解析失败 / 解码失败 → 同样 fallback
+- `fallback` 自身为 nil(测试场景)→ 静默 no-op
+
+**路由接线**:`AppState.Route.chat` case 加 `voiceId: String?` → `IPListView` 传 `item.voiceId` → `RootView` 透传给 `ChatView` → `makeChatViewModel(characterVoiceId:)`,App 一次配置。
+
+**流式 vs 整段**:当前是整段合成(后端返完整 MP3),不做 chunk-by-chunk streaming。Loop 11+ 再做 chunk 流式降低首字延迟。
+
+**已知限制**:
+- 模拟器 AVAudioEngine 跑 AVAudioFile 解析可能 codec 受限;`testSpeakWithVoiceId_InvalidMP3_FallsBack` 验证 fallback 链
+- 真实体验需后端 `uv run uvicorn app.main:app --port 8000` 在跑 + character `voiceId` 是合法火山音色 ID
+- 没 `voiceId` 的 character 仍走系统 "Tingting",这次 Loop 没破坏
+
 ## 下一步
 
-- Loop 10: PIPL 合规 + 跨设备同步 + sqlite-vec 真向量检索 + 火山引擎 TTS(用 `Character.voiceId` 字段)
 - Loop 11: 数字人形象(Path A: MuseTalk + 2K PNG)
+- Loop 12: SQLite FTS5 全文检索(Loop 10.1 已有 vec0,FTS5 是 keyword 检索补全)
+- Loop 13: PIPL 合规 + 数据导出/删除(本轮砍掉,用户优先级)
 
 ## 已知限制
 
@@ -217,12 +298,12 @@ public protocol SpeechServiceProtocol: AnyObject, Sendable {
 - 真机调试需要 Apple Developer 账号($99/年)+ 后端暴露到局域网
 - 模拟器上 iOS Data Protection 是 no-op(`xattr` 不显示 protection class),真机才会生效
 - **端上 LLM 只能在真机跑**:MLX 在 iOS 模拟器上初始化 Metal device 时 abort(`MTLSimDevice.architecture()` 返回 null,已知 MLX issue)— `AppState` 用 `!targetEnvironment(simulator)` 守门,模拟器上 `llm` 为 nil,IPList 顶栏不显示 banner,ChatView 不会触发抽取
+- **端上 NLEmbedding 模拟器 guard**:`#if os(iOS) && !targetEnvironment(simulator)` 才注入 `NLEmbeddingService`;模拟器上降级到 Loop 7 substring 检索,真机才走 vec0 KNN
 - **端上 STT 模拟器 mic 拾静音**:API 路径走得通(权限 / 状态机 / transcript stream 验证),但转写为空;真机用耳机体验最佳
 - 模拟器上 `AudioSessionManager` 仍能 enter/leave ref,但不真正激活 AVAudioSession
 - 模型未 ready 时发消息不会失败,只是不会触发 fact 抽取 + summary;ChatView 顶部 badge 提示当前状态
-- iCloud 跨设备同步 Loop 10 PIPL 合规阶段做
-- `semanticSearch` 当前是字符串包含匹配,Loop 10 替换为 sqlite-vec 真向量检索
-- TTS 当前用系统 "Tingting" 中文女声;`Character.voiceId` 字段已预留,Loop 10 接火山引擎做角色专属音色
+- 火山 TTS 真实体验需后端在跑 + character `voiceId` 是合法火山 ID;否则 fallback 到系统 TTS,功能不挂
+- 火山 TTS 当前整段合成,不做 chunk-by-chunk streaming(Loop 11+ 再优化)
 
 ## 部署到模拟器
 
