@@ -33,13 +33,30 @@ public final class AppState {
     // Loop 9: 端上语音服务 — iOS 模拟器与真机都可用(模拟器 mic 拾静音,API 路径能验证)
     public let speech: SpeechServiceProtocol?
 
+    // Loop 10.1: 端上 NLEmbedding — 模拟器上 NLEmbedding 可能 nil(iOS 18+ 真机才有 .chinese),
+    // 拿不到就 nil,Database 不建 vec0 表,降级回 substring 检索
+    public let embedding: EmbeddingServiceProtocol?
+
     public init(api: APIClient = APIClient()) {
         self.api = api
+
+        // Loop 10.1: 先建 embedding 服务,Database 需要拿它的 dimension 决定要不要建 facts_vec 表
+        // 模拟器 (targetEnvironment(simulator)) 上 NLEmbedding 经常 nil → graceful degrade
+        let embeddingService: EmbeddingServiceProtocol?
+        #if os(iOS) && !targetEnvironment(simulator)
+        embeddingService = NLEmbeddingService()
+        #else
+        embeddingService = nil
+        #endif
+        self.embedding = embeddingService
 
         // Loop 7: SQLite + 4 层记忆
         let db: Database?
         do {
-            db = try Database(path: DatabaseFactory.defaultPath())
+            db = try Database(
+                path: DatabaseFactory.defaultPath(),
+                embeddingService: embeddingService
+            )
         } catch {
             print("[AppState] Database init failed: \(error) — falling back to in-memory")
             db = nil
@@ -49,11 +66,12 @@ public final class AppState {
         if let db {
             let msgRepo = MessageRepository(database: db)
             let summaryRepo = SummaryRepository(database: db)
-            let factRepo = FactRepository(database: db)
+            let factRepo = FactRepository(database: db, embeddingService: embeddingService)
             self.memory = DefaultMemoryStore(
                 messageRepository: msgRepo,
                 summaryRepository: summaryRepo,
-                factRepository: factRepo
+                factRepository: factRepo,
+                embeddingService: embeddingService
             )
         } else {
             self.memory = InMemoryMemoryStore()

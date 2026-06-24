@@ -3,9 +3,15 @@
 /// 关键决策:
 /// - 按 user_id + category 查询,confidence DESC 排序,优先召回高置信度事实
 /// - touchAccess 每次召回时调用,confidence 不变但 access_count + 1,last_accessed_at 更新
-/// - 后续 Loop 接向量检索时,在 SQL 召回前 100 条后做语义 re-rank
+///
+/// Loop 10.1 加:
+/// - saveFact 同时异步算 embedding → 灌入 vec0 表 facts_vec
+/// - forgetFact 同时从 facts_vec 删行
+/// - vectorSearch 用 vec0 KNN(user_id 过滤,按 distance 升序)
+/// - 没有 embedding 服务 / DB 没 vec0 → 这些方法静默 no-op 或返回空数组(降级路径)
 import Foundation
 import SQLite
+import CSQLiteVec
 
 public final class FactRepository: @unchecked Sendable {
     private let db: Database
@@ -21,9 +27,13 @@ public final class FactRepository: @unchecked Sendable {
     private let accessCountCol = SQLite.Expression<Int64>("access_count")
     private let sourceMessageIdCol = SQLite.Expression<String?>("source_message_id")
 
-    public init(database: Database) {
+    /// 注入 embedding 服务(Loop 10.1)— nil 时 vec0 路径不可用
+    public init(database: Database, embeddingService: EmbeddingServiceProtocol? = nil) {
         self.db = database
+        self.embeddingService = embeddingService
     }
+
+    private let embeddingService: EmbeddingServiceProtocol?
 
     public func save(_ record: FactRecord) throws {
         try db.connection.run(table.insert(
@@ -37,6 +47,29 @@ public final class FactRepository: @unchecked Sendable {
             accessCountCol <- Int64(record.accessCount),
             sourceMessageIdCol <- record.sourceMessageId
         ))
+        // 异步算 embedding 入 facts_vec(失败 silent — 后续 ListFacts 仍能召回)
+        if let svc = embeddingService, db.vectorDimension != nil {
+            Task.detached(priority: .utility) { [weak self] in
+                await self?.embedAndStore(factId: record.id, content: record.content, service: svc)
+            }
+        }
+    }
+
+    private func embedAndStore(factId: String, content: String, service: EmbeddingServiceProtocol) async {
+        let optVec: [Float]? = try? await service.embed(content)
+        guard let vec = optVec, !vec.isEmpty else { return }
+        try? writeVecRow(factId: factId, vector: vec)
+    }
+
+    private func writeVecRow(factId: String, vector: [Float]) throws {
+        // 序列化 float[] 为 vec0 接受的 JSON 字符串(e.g. "[0.1, 0.2, ...]")
+        let json = "[" + vector.map { String($0) }.joined(separator: ",") + "]"
+        // SQLite.swift 没有 bind(?, ?) 形式,我们直接 prepare + step
+        let stmt = try db.connection.prepare(
+            "INSERT OR REPLACE INTO facts_vec(fact_id, embedding) VALUES (?, ?);"
+        )
+        // 用 SQLite.swift 的 run 接受 variadic binding
+        _ = try stmt.run(factId, json)
     }
 
     public func list(userId: String, category: FactRecord.Category? = nil, limit: Int = 100) throws -> [FactRecord] {
@@ -51,6 +84,10 @@ public final class FactRepository: @unchecked Sendable {
     public func forget(_ id: String) throws {
         let q = table.filter(idCol == id)
         try db.connection.run(q.delete())
+        // facts_vec 同步清
+        if db.vectorDimension != nil {
+            try? db.connection.run("DELETE FROM facts_vec WHERE fact_id = ?;", id)
+        }
     }
 
     /// 召回时调用 — last_accessed_at 更新,access_count + 1
@@ -68,6 +105,47 @@ public final class FactRepository: @unchecked Sendable {
     public func count(userId: String) throws -> Int {
         let q = table.filter(userIdCol == userId)
         return try db.connection.scalar(q.count)
+    }
+
+    /// Loop 10.1:vec0 KNN 检索 — query 文本先用 embedding 服务算向量,再调 vec0 distance 函数
+    /// 距离用 L2(欧式距离);返回 top-K facts JOIN facts_vec,按 distance 升序
+    /// 无 embedding 服务 / 无 vec0 → 返回空数组(降级到 substring 路径)
+    public func vectorSearch(
+        userId: String,
+        queryEmbedding: [Float],
+        limit: Int
+    ) throws -> [(fact: FactRecord, distance: Double)] {
+        guard db.vectorDimension != nil else { return [] }
+        guard !queryEmbedding.isEmpty else { return [] }
+        let json = "[" + queryEmbedding.map { String($0) }.joined(separator: ",") + "]"
+        let sql = """
+            SELECT f.id, f.user_id, f.category, f.content, f.confidence,
+                   f.created_at, f.last_accessed_at, f.access_count, f.source_message_id,
+                   v.distance
+            FROM facts_vec v
+            JOIN facts f ON f.id = v.fact_id
+            WHERE v.embedding MATCH ? AND k = ? AND f.user_id = ?
+            ORDER BY v.distance ASC;
+        """
+        var results: [(FactRecord, Double)] = []
+        let limitInt64 = Int64(limit)
+        for row in try db.connection.prepare(sql, json, limitInt64, userId) {
+            // row 是 [Binding?] — 顺序:fields + distance
+            let fact = FactRecord(
+                id: (row[0] as? String) ?? "",
+                userId: (row[1] as? String) ?? "",
+                category: FactRecord.Category(rawValue: (row[2] as? String) ?? "basic") ?? .basic,
+                content: (row[3] as? String) ?? "",
+                confidence: (row[4] as? Double) ?? 0,
+                createdAt: Date(timeIntervalSince1970: TimeInterval((row[5] as? Int64) ?? 0) / 1000.0),
+                lastAccessedAt: Date(timeIntervalSince1970: TimeInterval((row[6] as? Int64) ?? 0) / 1000.0),
+                accessCount: Int((row[7] as? Int64) ?? 0),
+                sourceMessageId: row[8] as? String
+            )
+            let distance = (row[9] as? Double) ?? 0
+            results.append((fact, distance))
+        }
+        return results
     }
 
     // MARK: - Mapping

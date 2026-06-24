@@ -3,16 +3,21 @@
 /// 依赖:
 /// - MessageRepository:Working 层持久化(冷启动重水合)、Short-term 摘要落 SQLite
 /// - SummaryRepository:7 天滚动摘要
-/// - FactRepository:长期事实
+/// - FactRepository:长期事实(含 Loop 10.1 的 vec0 KNN 检索)
 ///
 /// Working 层本身只是 in-memory cache,持久化由 MessageRepository 完成;
 /// 这样 App kill 重启后,ChatViewModel.init() 调一次 loadHistory 重新灌进 Working。
+///
+/// Loop 10.1:`semanticSearch` 走 vec0 KNN;
+/// - 有 embedding 服务 → query 文本 → embed → facts_vec MATCH → top-K → join facts
+/// - 没服务 / vec0 不可用 → 降级回 substring scoring(原 Loop 7 实现)
 import Foundation
 
 public final class DefaultMemoryStore: MemoryStore, @unchecked Sendable {
     private let messages: MessageRepository
     private let summaries: SummaryRepository
     private let facts: FactRepository
+    private let embeddingService: EmbeddingServiceProtocol?
 
     /// Working memory 的 in-memory 缓存;key = conversationId
     /// NSLock 是必要的 — @Observable ViewModel 在 MainActor 访问,Storage 调用可能在 background
@@ -22,11 +27,13 @@ public final class DefaultMemoryStore: MemoryStore, @unchecked Sendable {
     public init(
         messageRepository: MessageRepository,
         summaryRepository: SummaryRepository,
-        factRepository: FactRepository
+        factRepository: FactRepository,
+        embeddingService: EmbeddingServiceProtocol? = nil
     ) {
         self.messages = messageRepository
         self.summaries = summaryRepository
         self.facts = factRepository
+        self.embeddingService = embeddingService
     }
 
     // MARK: - Working
@@ -85,11 +92,25 @@ public final class DefaultMemoryStore: MemoryStore, @unchecked Sendable {
         try? facts.forget(id)
     }
 
-    // MARK: - Semantic (Loop 7 skeleton)
+    // MARK: - Semantic (Loop 10.1: vec0 KNN;Loop 7 fallback: substring scoring)
 
     public func semanticSearch(userId: String, query: String, limit: Int) -> [FactRecord] {
-        // Loop 7 占位:按 content 包含 query 任意 token(分词按空格 + 中文逐字)
-        // 真实实现需要接向量 — 下一阶段换 sqlite-vec 或端上 embedding
+        // 1) 优先走 vec0 KNN(若 embedding 服务 + DB 有 vec0 表)
+        if let svc = embeddingService {
+            let queryVec: [Float]? = Self.awaitBlocking { try await svc.embed(query) }
+            if let queryVec, !queryVec.isEmpty {
+                if let hits = try? facts.vectorSearch(userId: userId, queryEmbedding: queryVec, limit: limit),
+                   !hits.isEmpty {
+                    // touchAccess 标记召回,后续 MemoryStore 行为不变
+                    for hit in hits {
+                        try? facts.touchAccess(hit.fact.id)
+                    }
+                    return hits.map { $0.fact }
+                }
+            }
+        }
+
+        // 2) 降级:Loop 7 substring scoring(空格 + CJK 逐字)
         let all = listFacts(userId: userId, category: nil)
         let tokens = Self.tokens(in: query)
         if tokens.isEmpty {
@@ -103,6 +124,19 @@ public final class DefaultMemoryStore: MemoryStore, @unchecked Sendable {
             .sorted { $0.1 > $1.1 }
             .prefix(limit)
             .map { $0.0 }
+    }
+
+    /// 同步等待一次异步调用 — MemoryStore.semanticSearch 是 sync 协议,但 embedding 服务是 async
+    /// 用 DispatchSemaphore 单 call 等;调用方在 background 线程(NLLanguage.vector 在 detoured Task 里)
+    private static func awaitBlocking(_ op: @Sendable @escaping () async throws -> [Float]?) -> [Float]? {
+        let sem = DispatchSemaphore(value: 0)
+        var result: [Float]? = nil
+        Task.detached(priority: .userInitiated) {
+            result = (try? await op()) ?? nil
+            sem.signal()
+        }
+        sem.wait()
+        return result
     }
 
     // MARK: - Helpers

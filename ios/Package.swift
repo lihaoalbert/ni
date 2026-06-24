@@ -25,10 +25,21 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift-examples", exact: "2.25.6"),
     ],
     targets: [
+        // Loop 10.1: sqlite-vec C 扩展(vendored amalgamation v0.1.9)
+        // 纯 C,无 SIMD/asm,SwiftPM 直接 ctarget 编译,iOS / macOS 都 link
+        .target(
+            name: "CSQLiteVec",
+            path: "Sources/CSQLiteVec",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
+        ),
         // 库:纯 Foundation + 模型 + 网络层 + 存储 + 记忆 + 端上 LLM(SwiftUI 无关,Android KMP 复用候选)
         .target(
             name: "CompanionCore",
             dependencies: [
+                "CSQLiteVec",  // Loop 10.1: vec0 KNN 检索
                 .product(name: "SQLite", package: "SQLite.swift"),
                 // Loop 8: 端上 LLM — MLXLLM 提供 ModelContainer + generate;MLXLMCommon 提供 LLMRegistry
                 .product(name: "MLXLLM", package: "mlx-swift-examples"),

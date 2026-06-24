@@ -16,10 +16,10 @@ final class DatabaseTests: XCTestCase {
         let db = try Database(path: path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: path), "file should be created")
 
-        // 关闭后重新打开 → schema 应仍在(PRAGMA user_version = 1)
+        // 关闭后重新打开 → schema 应仍在(PRAGMA user_version = 2 — Loop 10.1)
         let db2 = try Database(path: path)
         let version = try db2.connection.scalar("PRAGMA user_version") as? Int64
-        XCTAssertEqual(version, 1, "schema version should persist across opens")
+        XCTAssertEqual(version, 2, "schema version should persist across opens")
     }
 
     func testSchemaCreatesTables() throws {
