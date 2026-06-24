@@ -155,9 +155,46 @@ final class ChatViewModelVoiceTests: XCTestCase {
         XCTAssertEqual(mockSpeech.state, .idle, "关闭 TTS 应停掉正在播的")
     }
 
+    // MARK: - Loop 10.3: characterVoiceId 路径 — speak(_:voiceId:) async
+
+    func testCommitStreamedMessage_WithVoiceId_CallsVoiceIdSpeak() async throws {
+        mockAPI.eventsToYield = [.text("火山"), .text("回复"), .done]
+        let vm = makeViewModel(voiceId: "BV001_streaming")
+        vm.setTTSEnabled(true)
+
+        vm.send("hi")
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        // voiceId 路径走 speak(_:voiceId:) async(不是同步的 speak(_:))
+        XCTAssertEqual(mockSpeech.voiceIdSpeakCallCount, 1, "voiceId 路径应调 speak(_:voiceId:)")
+        XCTAssertEqual(mockSpeech.lastVoiceId, "BV001_streaming")
+        XCTAssertEqual(mockSpeech.lastSpokenText, "火山回复")
+    }
+
+    func testCommitStreamedMessage_NoVoiceId_StillCallsPlainSpeak() async throws {
+        mockAPI.eventsToYield = [.text("系统"), .text("音"), .done]
+        let vm = makeViewModel(voiceId: nil)
+        vm.setTTSEnabled(true)
+
+        vm.send("hi")
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        // 无 voiceId → 走原 speak(_:) 同步路径
+        XCTAssertEqual(mockSpeech.voiceIdSpeakCallCount, 0, "无 voiceId 不应调 speak(_:voiceId:)")
+        XCTAssertEqual(mockSpeech.speakCallCount, 1, "应调 speak(_:)")
+    }
+
+    func testSpeakWithVoiceId_PropagatesArgs() async {
+        let vm = makeViewModel(voiceId: "BV002_other")
+        await vm.speak("走火山", voiceId: "BV002_other")
+        XCTAssertEqual(mockSpeech.lastSpokenText, "走火山")
+        XCTAssertEqual(mockSpeech.lastVoiceId, "BV002_other")
+        XCTAssertEqual(mockSpeech.voiceIdSpeakCallCount, 1)
+    }
+
     // MARK: - Helpers
 
-    private func makeViewModel() -> ChatViewModel {
+    private func makeViewModel(voiceId: String? = nil) -> ChatViewModel {
         let convID = "conv_\(AppConfig.localUserID)_ip_001"
         _ = try? ConversationRepository(database: db).upsert(
             id: convID, characterId: "ip_001", characterName: "苏晚"
@@ -171,7 +208,8 @@ final class ChatViewModelVoiceTests: XCTestCase {
             memory: memory,
             factExtractor: nil,
             summaryGenerator: nil,
-            speech: mockSpeech
+            speech: mockSpeech,
+            characterVoiceId: voiceId
         )
     }
 }

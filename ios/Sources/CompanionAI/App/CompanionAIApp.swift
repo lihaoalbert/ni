@@ -30,9 +30,9 @@ struct RootView: View {
             LoginView(appState: appState)
         case .ipList:
             IPListView(appState: appState)
-        case .chat(let id, let name, let avatar):
+        case .chat(let id, let name, let avatar, let voiceId):
             NavigationStack {
-                ChatView(appState: appState, characterID: id, characterName: name, avatarURL: avatar)
+                ChatView(appState: appState, characterID: id, characterName: name, avatarURL: avatar, voiceId: voiceId)
             }
             .task {
                 // Loop 9: 第一次进聊天页时申请语音权限(不阻塞 UI)

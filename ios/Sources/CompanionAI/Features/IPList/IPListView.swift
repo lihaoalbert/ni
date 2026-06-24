@@ -78,7 +78,12 @@ public struct IPListView: View {
         case .loaded(let items):
             List(items) { item in
                 Button {
-                    appState.openChat(characterID: item.id, characterName: item.name, avatarURL: item.avatarURL)
+                    appState.openChat(
+                        characterID: item.id,
+                        characterName: item.name,
+                        avatarURL: item.avatarURL,
+                        voiceId: item.voiceId
+                    )
                 } label: {
                     IPCard(item: item)
                 }

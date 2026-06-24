@@ -117,6 +117,9 @@ final class MockSpeechService: SpeechServiceProtocol, @unchecked Sendable {
     var scheduledPartials: [String] = []
     var lastSpokenText: String?
     var speakCallCount = 0
+    /// Loop 10.3: 带 voiceId 的 speak 调用记录
+    var lastVoiceId: String?
+    var voiceIdSpeakCallCount = 0
 
     // transcript stream — 每次 startListening() 新建
     private var currentContinuation: AsyncStream<String>.Continuation?
@@ -152,6 +155,15 @@ final class MockSpeechService: SpeechServiceProtocol, @unchecked Sendable {
     func speak(_ text: String) {
         guard !text.isEmpty else { return }
         lastSpokenText = text
+        speakCallCount += 1
+        state = .speaking
+    }
+
+    func speak(_ text: String, voiceId: String?) async {
+        guard !text.isEmpty else { return }
+        lastSpokenText = text
+        lastVoiceId = voiceId
+        voiceIdSpeakCallCount += 1
         speakCallCount += 1
         state = .speaking
     }

@@ -17,6 +17,7 @@ public struct ChatView: View {
     let characterID: String
     let characterName: String
     let avatarURL: URL
+    let voiceId: String?
     @Bindable var appState: AppState
     @State private var viewModel: ChatViewModel
     @State private var input: String = ""
@@ -24,16 +25,25 @@ public struct ChatView: View {
     @State private var showPermissionAlert: Bool = false
     @State private var isMicPressed: Bool = false
 
-    public init(appState: AppState, characterID: String, characterName: String, avatarURL: URL) {
+    public init(
+        appState: AppState,
+        characterID: String,
+        characterName: String,
+        avatarURL: URL,
+        voiceId: String? = nil
+    ) {
         self.appState = appState
         self.characterID = characterID
         self.characterName = characterName
         self.avatarURL = avatarURL
+        self.voiceId = voiceId
         // Loop 7: 走 AppState 工厂,自动绑定 conversationId + 注入 MemoryStore(冷启动重水合历史)
+        // Loop 10.3: 传 voiceId → ChatViewModel 走 StreamingSpeechService(火山)而不是系统 TTS
         self._viewModel = State(initialValue: appState.makeChatViewModel(
             characterID: characterID,
             characterName: characterName,
-            api: appState.apiClient()
+            api: appState.apiClient(),
+            characterVoiceId: voiceId
         ))
     }
 

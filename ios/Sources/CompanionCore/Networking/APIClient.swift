@@ -11,6 +11,10 @@ public protocol APIClientProtocol: Sendable {
         characterID: String,
         message: String
     ) -> AsyncThrowingStream<SSEEvent, Error>
+
+    /// Loop 10.3: 调后端 /voice/tts/synthesize 拿音频 bytes
+    /// 默认实现走真实 URLSession;MockAPIClient 提供 canned data
+    func synthesizeTTS(req: VolcanoTTSRequest) async throws -> Data
 }
 
 public enum APIError: Error, LocalizedError {
@@ -149,6 +153,33 @@ public struct APIClient: APIClientProtocol {
                 task.cancel()
             }
         }
+    }
+
+    // MARK: - Voice backend
+
+    public func synthesizeTTS(req: VolcanoTTSRequest) async throws -> Data {
+        let url = chatBase.appendingPathComponent("/voice/tts/synthesize")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
+        let payload: [String: Any] = [
+            "text": req.text,
+            "voice_id": req.voiceId as Any,
+            "format": req.format.rawValue,
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.transport(URLError(.badServerResponse))
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw VolcanoTTSError.httpStatus(http.statusCode)
+        }
+        guard !data.isEmpty else {
+            throw VolcanoTTSError.emptyResponse
+        }
+        return data
     }
 
     // MARK: - Internal

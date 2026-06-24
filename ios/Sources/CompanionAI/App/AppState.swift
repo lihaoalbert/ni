@@ -2,6 +2,8 @@
 // Loop 7: 持有 Database + MemoryStore,App 全程单例,ChatViewModel 通过这里注入
 // Loop 8: 持有 OnDeviceLLMService + FactExtractor + SummaryGenerator;ChatViewModel 通过工厂注入
 // Loop 9: 持有 SpeechService(iOS only);ChatViewModel 拿到引用后接入按住说话 + 自动 TTS
+// Loop 10.3: 路由携带 characterVoiceId — 进聊天页时根据 voiceId 选 StreamingSpeechService(火山)
+//   或 AppleSpeechService(系统 TTS);ChatViewModel 拿到 voiceId 后 commitStreamedMessage 走对应路径
 import Foundation
 import Observation
 import CompanionCore
@@ -12,7 +14,7 @@ public final class AppState {
     public enum Route: Equatable, Sendable {
         case login
         case ipList
-        case chat(characterID: String, characterName: String, avatarURL: URL)
+        case chat(characterID: String, characterName: String, avatarURL: URL, voiceId: String?)
     }
 
     public var route: Route = .login
@@ -140,8 +142,8 @@ public final class AppState {
         route = .login
     }
 
-    public func openChat(characterID: String, characterName: String, avatarURL: URL) {
-        route = .chat(characterID: characterID, characterName: characterName, avatarURL: avatarURL)
+    public func openChat(characterID: String, characterName: String, avatarURL: URL, voiceId: String? = nil) {
+        route = .chat(characterID: characterID, characterName: characterName, avatarURL: avatarURL, voiceId: voiceId)
     }
 
     public func backToList() {
@@ -165,7 +167,14 @@ public final class AppState {
     }
 
     /// ChatViewModel 工厂 — 进聊天页时调用一次
-    public func makeChatViewModel(characterID: String, characterName: String, api: APIClientProtocol) -> ChatViewModel {
+    /// - characterVoiceId: 有值 → ChatViewModel 自动调 speak(_:voiceId:)(火山引擎)
+    ///                    nil → 走系统 TTS(speak(_:))
+    public func makeChatViewModel(
+        characterID: String,
+        characterName: String,
+        api: APIClientProtocol,
+        characterVoiceId: String? = nil
+    ) -> ChatViewModel {
         let convID = conversationID(for: characterID)
         let userID = AppConfig.localUserID
 
@@ -179,6 +188,15 @@ public final class AppState {
             )
         }
 
+        // Loop 10.3: 有 voiceId → 每次进聊天新建 StreamingSpeechService(包火山 TTS client + Apple fallback)
+        // 没 voiceId → 复用 AppState 自带的系统 TTS(共享给 STT)
+        let chatSpeech: SpeechServiceProtocol?
+        if let vid = characterVoiceId, !vid.isEmpty {
+            chatSpeech = StreamingSpeechService(api: api, fallback: speech)
+        } else {
+            chatSpeech = speech
+        }
+
         return ChatViewModel(
             characterID: characterID,
             characterName: characterName,
@@ -188,7 +206,8 @@ public final class AppState {
             memory: memory,
             factExtractor: factExtractor,
             summaryGenerator: summaryGenerator,
-            speech: speech
+            speech: chatSpeech,
+            characterVoiceId: characterVoiceId
         )
     }
 

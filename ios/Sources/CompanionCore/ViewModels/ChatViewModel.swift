@@ -33,6 +33,8 @@ public final class ChatViewModel {
 
     public let characterID: String
     public let characterName: String
+    /// Loop 10.3: 角色火山音色 ID — nil = 走系统 TTS,有值 = 后端火山引擎
+    public let characterVoiceId: String?
     public let userID: String
     public let conversationID: String
 
@@ -57,10 +59,12 @@ public final class ChatViewModel {
         memory: MemoryStore,
         factExtractor: FactExtractorProtocol? = nil,
         summaryGenerator: SummaryGeneratorProtocol? = nil,
-        speech: SpeechServiceProtocol? = nil
+        speech: SpeechServiceProtocol? = nil,
+        characterVoiceId: String? = nil
     ) {
         self.characterID = characterID
         self.characterName = characterName
+        self.characterVoiceId = characterVoiceId
         self.userID = userID
         self.conversationID = conversationID
         self.api = api
@@ -186,9 +190,17 @@ public final class ChatViewModel {
             triggerAutoMemoryExtraction()
             maybeTriggerSummary()
 
-            // Loop 9: TTS 自动朗读(若启用 + speech 可用 + 没在监听)
+            // Loop 9/10.3: TTS 自动朗读(若启用 + speech 可用 + 没在监听)
+            // - character 有 voiceId → 火山引擎流式(优先)
+            // - 无 voiceId → 系统 AVSpeechSynthesizer
             if ttsEnabled, speech != nil, !isListening {
-                speak(text)
+                if let voiceId = characterVoiceId {
+                    Task { @MainActor in
+                        await self.speak(text, voiceId: voiceId)
+                    }
+                } else {
+                    speak(text)
+                }
             }
         }
         status = .done
@@ -280,6 +292,14 @@ public final class ChatViewModel {
         guard let speech else { return }
         guard ttsEnabled, !text.isEmpty else { return }
         speech.speak(text)
+        speechState = speech.state
+    }
+
+    /// Loop 10.3: 带 voiceId 的朗读(异步)— 用于火山引擎流式
+    public func speak(_ text: String, voiceId: String) async {
+        guard let speech else { return }
+        guard ttsEnabled, !text.isEmpty else { return }
+        await speech.speak(text, voiceId: voiceId)
         speechState = speech.state
     }
 

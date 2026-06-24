@@ -22,7 +22,7 @@ APP_NAME="CompanionAI"
 BUNDLE_ID="com.niapp.${APP_NAME}"
 
 echo "==> build"
-xcodebuild \
+(cd "$ROOT_DIR" && xcodebuild \
     -scheme "$APP_NAME" \
     -destination "platform=iOS Simulator,name=${DEVICE_NAME}" \
     -configuration Debug \
@@ -30,7 +30,7 @@ xcodebuild \
     -clonedSourcePackagesDirPath "$ROOT_DIR/.build/SourcePackages" \
     -skipPackagePluginValidation \
     -onlyUsePackageVersionsFromResolvedFile \
-    -quiet
+    -quiet)
 
 echo "==> find simulator"
 DEVICE_UDID=$(xcrun simctl list devices "iOS" | grep "${DEVICE_NAME} (" | head -1 | grep -oE "[0-9A-F-]{36}")
