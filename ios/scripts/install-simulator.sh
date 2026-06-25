@@ -46,6 +46,13 @@ if [ -n "$APP_CONTAINER" ]; then
     # 已有 bundle 目录,直接覆盖二进制和资源
     cp -f "$BUILD_DIR/$APP_NAME" "$APP_CONTAINER/$APP_NAME"
     echo "  binary updated"
+    # Loop 10 修 crash:SwiftPM 不让 Info.plist 作为 resource(target build 自动生成的 plist
+    # 缺 NSMicrophone/SpeechRecognition UsageDescription → 进 ChatView 调
+    # SFSpeechRecognizer 时 TCC abort).从源拷贝覆盖 bundle 的 plist。
+    if [ -f "$ROOT_DIR/Sources/CompanionAI/Resources/Info.plist" ]; then
+        cp -f "$ROOT_DIR/Sources/CompanionAI/Resources/Info.plist" "$APP_CONTAINER/Info.plist"
+        echo "  Info.plist replaced (with UsageDescription keys)"
+    fi
 else
     # 没有 — 错误,先手动 install 一次
     echo "error: $BUNDLE_ID not installed yet. Run xcrun simctl install once with the .app, or use Xcode."

@@ -62,3 +62,6 @@ backend/.vector_db/
 *.key
 *.crt
 **/secrets/
+# ===== 后端 / 服务运行产物(Loop 10.3) =====
+.run-logs/
+.run-pids/
