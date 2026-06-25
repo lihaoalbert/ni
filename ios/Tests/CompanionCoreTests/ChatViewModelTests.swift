@@ -125,6 +125,11 @@ final class MockAPIClient: APIClientProtocol, @unchecked Sendable {
     var ttsCallCount = 0
     var lastTTSRequest: VolcanoTTSRequest?
 
+    /// Loop 10.3 UI: TTS 状态 mock — 测试可设 nextTTSInfo / nextTTSInfoError
+    var nextTTSInfo: TTSInfo?
+    var nextTTSInfoError: Error?
+    var ttsInfoCallCount = 0
+
     func login(email: String, password: String) async throws -> AuthToken {
         AuthToken(
             accessToken: "mock-token",
@@ -165,5 +170,14 @@ final class MockAPIClient: APIClientProtocol, @unchecked Sendable {
         lastTTSRequest = req
         if let err = nextTTSError { throw err }
         return nextTTSData ?? Data()
+    }
+
+    func ttsInfo() async throws -> TTSInfo {
+        ttsInfoCallCount += 1
+        if let err = nextTTSInfoError { throw err }
+        return nextTTSInfo ?? TTSInfo(
+            provider: "mock", configured: false, defaultVoice: "",
+            endpoint: "", cacheBackend: "memory", cacheMaxSize: 0
+        )
     }
 }

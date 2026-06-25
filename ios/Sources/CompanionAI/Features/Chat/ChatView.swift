@@ -68,6 +68,10 @@ public struct ChatView: View {
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
+        // Loop 10.3 UI: 启动时探一次后端 TTS 状态 — toolbar badge 用
+        .task {
+            await viewModel.probeTTSStatus()
+        }
         .toolbar {
             ToolbarItem(placement: toolbarLeading) {
                 Button("返回") { appState.backToList() }
@@ -95,6 +99,8 @@ public struct ChatView: View {
     @ViewBuilder
     private var toolbarTrailingItems: some View {
         HStack(spacing: 12) {
+            // Loop 10.3 UI: TTS provider badge — 显示当前 TTS 状态
+            ttsStatusBadge
             // TTS 开关
             if appState.speech != nil {
                 Button {
@@ -106,6 +112,46 @@ public struct ChatView: View {
                 .accessibilityLabel(viewModel.ttsEnabled ? "关闭朗读" : "开启朗读")
             }
             llmStatusBadge
+        }
+    }
+
+    /// Loop 10.3 UI: TTS provider 状态 badge
+    /// - 火山配齐:绿色 "火山" + 默认音色
+    /// - 火山未配:黄色 "Mock"
+    /// - 后端不通:红色 "⚠️"
+    /// - 未探测:不显示
+    @ViewBuilder
+    private var ttsStatusBadge: some View {
+        switch viewModel.ttsProviderStatus {
+        case .unknown:
+            EmptyView()
+        case .volcengineReady(let voice, _):
+            HStack(spacing: 3) {
+                Circle().fill(.green).frame(width: 6, height: 6)
+                Text("火山")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.green.opacity(0.12), in: Capsule())
+            .accessibilityLabel("TTS 火山引擎就绪,音色 \(voice)")
+        case .mock, .volcengineNotConfigured:
+            HStack(spacing: 3) {
+                Circle().fill(.orange).frame(width: 6, height: 6)
+                Text("Mock")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange.opacity(0.12), in: Capsule())
+            .accessibilityLabel("TTS 走 Mock,火山未配置")
+        case .unreachable(let msg):
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+                .font(.caption)
+                .accessibilityLabel("TTS 后端不通:\(msg)")
         }
     }
 

@@ -15,6 +15,29 @@ public protocol APIClientProtocol: Sendable {
     /// Loop 10.3: 调后端 /voice/tts/synthesize 拿音频 bytes
     /// 默认实现走真实 URLSession;MockAPIClient 提供 canned data
     func synthesizeTTS(req: VolcanoTTSRequest) async throws -> Data
+
+    /// Loop 10.3 UI: 拉 TTS provider 状态 — 后端 /voice/tts/info
+    /// 不调实际合成,只读 settings;火山凭据缺失时仍 200,configured=false
+    func ttsInfo() async throws -> TTSInfo
+}
+
+/// Loop 10.3 UI: 后端 TTS 状态镜像 — iOS ChatView toolbar badge 用
+public struct TTSInfo: Codable, Sendable, Equatable {
+    public let provider: String        // "mock" | "volcengine"
+    public let configured: Bool        // 凭据是否齐全
+    public let defaultVoice: String    // "zh_female_qingxin" 等
+    public let endpoint: String        // host 部分,避免泄露完整 URL
+    public let cacheBackend: String    // "memory" | "redis"
+    public let cacheMaxSize: Int
+
+    enum CodingKeys: String, CodingKey {
+        case provider
+        case configured
+        case defaultVoice = "default_voice"
+        case endpoint
+        case cacheBackend = "cache_backend"
+        case cacheMaxSize = "cache_max_size"
+    }
 }
 
 public enum APIError: Error, LocalizedError {
@@ -180,6 +203,17 @@ public struct APIClient: APIClientProtocol {
             throw VolcanoTTSError.emptyResponse
         }
         return data
+    }
+
+    // MARK: - Voice info (Loop 10.3 UI badge)
+
+    public func ttsInfo() async throws -> TTSInfo {
+        let url = chatBase.appendingPathComponent("/voice/tts/info")
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 5
+        return try await perform(req)
     }
 
     // MARK: - Internal

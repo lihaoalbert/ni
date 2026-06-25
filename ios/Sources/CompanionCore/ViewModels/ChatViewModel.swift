@@ -31,6 +31,18 @@ public final class ChatViewModel {
     public private(set) var currentListeningTranscript: String = ""
     public var ttsEnabled: Bool = true
 
+    // Loop 10.3 UI: 后端 TTS provider 状态 — toolbar badge 用
+    // .unknown: 还没探测;.mock: 假数据;.volcengineReady: 火山配齐可调;
+    // .volcengineNotConfigured: 火山 provider 但凭据缺;.unreachable: 后端探不通
+    public enum TTSProviderStatus: Equatable, Sendable {
+        case unknown
+        case mock
+        case volcengineReady(defaultVoice: String, endpoint: String)
+        case volcengineNotConfigured
+        case unreachable(message: String)
+    }
+    public private(set) var ttsProviderStatus: TTSProviderStatus = .unknown
+
     public let characterID: String
     public let characterName: String
     /// Loop 10.3: 角色火山音色 ID — nil = 走系统 TTS,有值 = 后端火山引擎
@@ -314,6 +326,38 @@ public final class ChatViewModel {
     public func setTTSEnabled(_ enabled: Bool) {
         ttsEnabled = enabled
         if !enabled { stopSpeaking() }
+    }
+
+    // MARK: - Loop 10.3 UI: TTS 状态探测
+
+    /// 调一次后端 /voice/tts/info 更新 ttsProviderStatus — 失败保留旧值
+    /// UI 在 ChatView onAppear 调一次即可,不需要轮询
+    public func probeTTSStatus() async {
+        do {
+            let info = try await api.ttsInfo()
+            ttsProviderStatus = Self.classify(info: info)
+        } catch {
+            ttsProviderStatus = .unreachable(message: error.localizedDescription)
+        }
+    }
+
+    /// 后端 info → UI 状态分类
+    /// - provider == "mock" → .mock
+    /// - provider == "volcengine" + configured=true → .volcengineReady
+    /// - provider == "volcengine" + configured=false → .volcengineNotConfigured
+    /// - 其它 provider 名 → .mock(防御,不该出现)
+    static func classify(info: TTSInfo) -> TTSProviderStatus {
+        if info.provider == "mock" { return .mock }
+        if info.provider == "volcengine" {
+            if info.configured {
+                return .volcengineReady(
+                    defaultVoice: info.defaultVoice,
+                    endpoint: info.endpoint
+                )
+            }
+            return .volcengineNotConfigured
+        }
+        return .mock
     }
 
     // MARK: - Loop 8: 自动抽取 + 摘要生成
