@@ -47,6 +47,19 @@ class STTTranscribeResponse(BaseModel):
     language: str
 
 
+class TTSInfoResponse(BaseModel):
+    """TTS provider 状态 — iOS ChatView toolbar 用来显示当前是 mock / volcengine / 未配置
+
+    不实际调 TTS,只是 introspection,所以缓存 / 网络抖动不影响。
+    """
+    provider: str = Field(..., description="mock | volcengine")
+    configured: bool = Field(..., description="凭据是否齐全(对 volcengine 才有意义)")
+    default_voice: str = Field(..., description="默认音色 ID")
+    endpoint: str = Field(..., description="TTS HTTP 端点(host 路径)")
+    cache_backend: str = Field(..., description="memory | redis")
+    cache_max_size: int
+
+
 # ===== Format → MIME 映射 =====
 
 
@@ -100,6 +113,31 @@ async def tts_synthesize(
             "Content-Length": str(len(audio)),
             "X-Audio-Format": req.format.value,
         },
+    )
+
+
+@router.get("/tts/info", response_model=TTSInfoResponse)
+async def tts_info(
+    settings: Settings = Depends(get_settings),
+) -> TTSInfoResponse:
+    """TTS provider 状态 introspection — iOS toolbar 显示
+
+    不实际调 TTS,只是读 settings。火山凭据缺失时不抛错,configured=false
+    让前端知道"火山未配,听的是 mock 或 fallback"。
+    """
+    provider = settings.tts_provider
+    configured = bool(
+        settings.volc_app_id and settings.volc_access_key and settings.volc_secret_key
+    )
+    # endpoint host 部分,避免泄露 token / 完整 URL
+    endpoint_host = settings.volc_tts_endpoint.split("//", 1)[-1].split("/", 1)[0]
+    return TTSInfoResponse(
+        provider=provider,
+        configured=configured,
+        default_voice=settings.volc_default_voice,
+        endpoint=endpoint_host,
+        cache_backend=settings.tts_cache_backend,
+        cache_max_size=settings.tts_cache_max_size,
     )
 
 

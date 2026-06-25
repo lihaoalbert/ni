@@ -18,10 +18,12 @@ Opus 转换:
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import shutil
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass
 
 import httpx
@@ -47,7 +49,7 @@ class VolcengineConfig:
     secret_key: str
     tts_endpoint: str = "https://openspeech.bytedance.com/api/v1/tts"
     stt_endpoint: str = "https://openspeech.bytedance.com/api/v1/asr"
-    cluster: str = "volcano_tts"
+    cluster: str = "volcengine_tts"
     default_voice: str = "zh_female_qingxin"
 
     def authorization_header(self) -> str:
@@ -191,20 +193,35 @@ class VolcengineTTSProvider:
         audio_format: str,
     ) -> bytes:
         """直接调火山 TTS API 拿音频"""
+        # 火山 TTS 异步 API:audio_params 是 JSON-encoded 字符串(实测 500 if nested object)
+        # speech_rate: -50 ~ 50 (字面 0 = 正常速度)
+        audio_params = json.dumps({
+            "format": audio_format,
+            "sample_rate": 16000,
+            "speech_rate": 0,
+        })
         body = {
             "app": {
                 "appid": self.config.app_id,
                 "cluster": self.config.cluster,
+                "token": self.config.authorization_header(),
             },
             "user": {"uid": "default_user"},
-            "request": {
-                "text": text,
+            "audio": {
                 "voice_type": voice_id,
-                "audio_params": {
-                    "format": audio_format,
-                    "sample_rate": 16000,
-                    "speech_rate": 0,
-                },
+                "encoding": audio_format,
+                "speed_ratio": 1.0,
+                "volume_ratio": 1.0,
+                "pitch_ratio": 1.0,
+            },
+            "request": {
+                "reqid": str(uuid.uuid4()),
+                "text": text,
+                "text_type": "plain",
+                "operation": "query",
+                "with_frontend": 1,
+                "frontend_type": "unitTson",
+                "audio_params": audio_params,
             },
         }
 
