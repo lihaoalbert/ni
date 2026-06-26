@@ -1,0 +1,115 @@
+# GitHub Actions CI — 跑 backend pytest + iOS swift test
+# 触发:push 到 main / PR 打开或同步
+# 目的:Loop 12 起的 3-Agent 试点需要 CI 给 Review Agent 提供 verdict
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 取消同一 ref 上先前 in-progress 的 run(节省 CI 分钟)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===== 后端:pytest =====
+  backend-test:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 用 uv 比 pip 快,且 lockfile 已存在(uv.lock)
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # 测试用 fakeredis + respx + mock LLM,完全离线可跑
+      - name: Run pytest
+        run: uv run pytest --tb=short -q
+
+      - name: Upload coverage
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend/.coverage
+          retention-days: 7
+
+  # ===== 后端:Evals 评测(可选)=====
+  # 用 mock provider 跑 8 个 YAML case,验证 prompt 没回归
+  # 当前不强制 fail,但每次跑出 baseline,以后可以加 fail-under 门禁
+  backend-evals:
+    name: Backend Evals (mock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: backend-test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install uv
+      - run: uv sync --all-extras --dev
+
+      - name: Run evals (mock LLM)
+        run: |
+          uv run pytest tests/evals/ -v --tb=short 2>&1 | tee evals-output.txt
+          # 抓取 summary 行,即使 case 失败也 upload 上来
+          grep -E "(\[eval summary\]|passed|failed)" evals-output.txt > eval-summary.txt || true
+
+      - name: Upload eval summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-summary
+          path: backend/eval-summary.txt
+          retention-days: 14
+
+  # ===== iOS:swift test =====
+  # 用 macOS runner(必须 — Linux 无 swift test 跑 iOS target)
+  ios-test:
+    name: iOS (swift test)
+    runs-on: macos-14
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      # macos-14 自带 Swift 5.10+ 和 Xcode 15.3+,够用
+      - name: Show Swift version
+        run: swift --version
+
+      # Package.swift 用 iOS 17 / macOS 14 — macos-14 runner 自带 SDK
+      - name: Run swift test
+        run: swift test --package-path . 2>&1 | tee test-output.txt
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-log
+          path: ios/test-output.txt
+          retention-days: 7
