@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     volc_resource_id: str = "seed-tts-2.0"  # X-Api-Resource-Id,模型版本选择器
     volc_tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
     volc_stt_endpoint: str = "https://openspeech.bytedance.com/api/v1/asr"
-    volc_default_voice: str = "BV005_streaming"  # 活泼女声
+    volc_default_voice: str = "saturn_zh_female_cancan_tob"  # 知性灿灿(V3 大模型配对音色)
     volc_cluster: str = "volcano_tts"  # STT V1 body 字段
     # TTS 缓存配置
     # backend: memory (进程内 LRU,默认) | redis (多 worker 共享)

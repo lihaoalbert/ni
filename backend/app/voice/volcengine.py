@@ -1,12 +1,16 @@
 """火山引擎 TTS / STT Provider — Loop 5b + Loop 10.3+
 
 TTS(新 豆包语音 V3 大模型):
-- 端点:https://openspeech.bytedance.com/api/v3/tts/unidirectional (HTTP Chunked 单向流式)
+- 端点:https://openspeech.bytedance.com/api/v3/tts/unidirectional
 - 鉴权:极简 — header `X-Api-Key` + header `X-Api-Resource-Id` (model selector)
 - 请求体: { req_params: { text, speaker, audio_params: { format, sample_rate } } }
-- 响应:流式二进制音频 (MP3 / WAV / OGG_OPUS / PCM)
+- 响应:application/json — { code:0, message:"", data:"<base64 音频>" }
 - 在 https://console.volcengine.com/speech/new/setting/apikeys 拿 API Key (UUID 格式)
 - 在 https://console.volcengine.com/speech/new/setting/activate 开通模型(seed-tts-2.0 等)
+
+注意:V3 大模型 (resource_id=seed-tts-2.0) 配的是新命名音色
+(zh_female_vv_uranus_bigtss / saturn_zh_female_cancan_tob 等);
+BV*_streaming 音色属于小模型 volcano_tts 集群,不能跟 seed-tts-2.0 混用。
 
 STT(仍用旧版 openspeech V1):
 - 端点:https://openspeech.bytedance.com/api/v1/asr
@@ -15,8 +19,7 @@ STT(仍用旧版 openspeech V1):
 - AppID/AccessKey/SecretKey 在旧版控制台 https://console.volcengine.com/speech/service/10035 拿
 
 Opus 转换:
-- 火山只输出 mp3/wav/ogg_opus/pcm,iOS 要 Opus-in-OGG 直接拿 ogg_opus 即可;
-  旧 MP3 → Opus 路径仍保留(虽然基本用不到)
+- V3 直出 ogg_opus(无需 ffmpeg 转换);旧 MP3 → Opus 路径保留兜底
 """
 from __future__ import annotations
 
@@ -52,7 +55,7 @@ class VolcengineConfig:
     api_key: str = ""
     resource_id: str = "seed-tts-2.0"  # X-Api-Resource-Id,模型选择器
     tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
-    default_voice: str = "BV005_streaming"  # V3 API 接受老 BV*_streaming 和新 bigtts 音色
+    default_voice: str = "saturn_zh_female_cancan_tob"  # 知性灿灿(V3 大模型配对音色)
 
     # ===== STT(openspeech V1 旧版鉴权)=====
     app_id: str = ""
@@ -209,13 +212,19 @@ class VolcengineTTSProvider:
         voice_id: str,
         response_format: str,
     ) -> bytes:
-        """调 openspeech V3 端点,收集 chunked 流式响应 bytes
+        """调 openspeech V3 端点,解析 NDJSON 响应,拼接 base64 解码 audio
 
-        V3 文档:
+        V3 unidirectional 端点实际响应(NDJSON,换行分隔多行 JSON):
         POST {endpoint}
-        headers: X-Api-Key, X-Api-Resource-Id, Content-Type
+        headers: X-Api-Key, X-Api-Resource-Id, Content-Type: application/json
         body: { req_params: { text, speaker, audio_params: { format, sample_rate } } }
-        resp: HTTP/1.1 Chunked,二进制音频流
+        resp: text/plain; charset=utf-8
+          {"code":0,"message":"","data":"<base64 音频片段1>"}
+          {"code":0,"message":"","data":"<base64 音频片段2>"}
+          ...
+          {"code":0,"message":"","data":null,"sentence":{...}}    # 句末元数据
+          {"code":20000000,"message":"OK","data":null}              # 结束标记
+        错误时所有 chunk 都带非 0 code。
         """
         url = self.config.tts_endpoint
         headers = {
@@ -236,32 +245,63 @@ class VolcengineTTSProvider:
 
         client = await self._get_client()
         try:
-            # stream=True 让 httpx 按 chunk 读,避免一次性把整段响应加载到内存
-            async with client.stream(
-                "POST", url, headers=headers, content=json.dumps(body),
-            ) as response:
-                if response.status_code != 200:
-                    # 错误响应是 JSON,不是 chunked 流
-                    try:
-                        err_body = await response.aread()
-                        err_text = err_body.decode("utf-8", errors="replace")
-                        try:
-                            err_json = json.loads(err_text)
-                            err_msg = err_json.get("message") or err_json.get("error") or err_text[:300]
-                        except json.JSONDecodeError:
-                            err_msg = err_text[:300]
-                    except Exception:
-                        err_msg = f"HTTP {response.status_code}"
-                    raise RuntimeError(
-                        f"火山 TTS API 错误 (HTTP {response.status_code}): {err_msg}"
-                    )
-
-                chunks: list[bytes] = []
-                async for chunk in response.aiter_bytes():
-                    chunks.append(chunk)
-                return b"".join(chunks)
+            response = await client.post(
+                url, headers=headers, content=json.dumps(body),
+            )
         except httpx.HTTPError as e:
             raise RuntimeError(f"火山 TTS 网络错误: {e}") from e
+
+        if response.status_code != 200:
+            err_text = response.text[:300]
+            try:
+                err_json = response.json()
+                err_msg = err_json.get("message") or err_text
+            except Exception:
+                err_msg = err_text
+            raise RuntimeError(
+                f"火山 TTS API 错误 (HTTP {response.status_code}): {err_msg}"
+            )
+
+        # NDJSON:逐行解析,拼接所有非空 data 的 base64 解码结果
+        # code 语义:0=音频 chunk OK, 20000000=结束标记 OK, 其他=错误
+        chunks: list[bytes] = []
+        error_code: int | None = None
+        error_message: str = ""
+        for line in response.text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            code = obj.get("code", 0)
+            data_b64 = obj.get("data")
+            if code not in (0, 20000000):
+                # 非 OK 状态:记下错误(可能多行错误,但首条通常最有信息量)
+                if error_code is None:
+                    error_code = code
+                    error_message = obj.get("message", "")
+                continue
+            if data_b64:
+                try:
+                    chunks.append(base64.b64decode(data_b64))
+                except Exception as e:
+                    raise RuntimeError(
+                        f"火山 TTS base64 解码失败 (line code={code}): {e}"
+                    ) from e
+
+        if error_code is not None:
+            raise RuntimeError(
+                f"火山 TTS API 错误 (code={error_code}): {error_message}"
+            )
+
+        if not chunks:
+            raise RuntimeError(
+                f"火山 TTS 响应无音频数据: {response.text[:200]}"
+            )
+
+        return b"".join(chunks)
 
     @property
     def provider_name(self) -> str:
