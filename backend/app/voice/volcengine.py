@@ -1,19 +1,22 @@
-"""火山引擎 TTS / STT Provider — Loop 5b
+"""火山引擎 TTS / STT Provider — Loop 5b + Loop 10.3+
 
-火山引擎 TTS API (https://openspeech.bytedance.com):
-- POST /api/v1/tts
-- Bearer token (Base64-encoded access_key:secret_key)
-- 请求体: app/user/audio/request
-- 响应: 二进制音频 (MP3 默认)
+TTS(新 豆包语音 V3 大模型):
+- 端点:https://openspeech.bytedance.com/api/v3/tts/unidirectional (HTTP Chunked 单向流式)
+- 鉴权:极简 — header `X-Api-Key` + header `X-Api-Resource-Id` (model selector)
+- 请求体: { req_params: { text, speaker, audio_params: { format, sample_rate } } }
+- 响应:流式二进制音频 (MP3 / WAV / OGG_OPUS / PCM)
+- 在 https://console.volcengine.com/speech/new/setting/apikeys 拿 API Key (UUID 格式)
+- 在 https://console.volcengine.com/speech/new/setting/activate 开通模型(seed-tts-2.0 等)
 
-火山引擎 STT API:
-- POST /api/v1/asr
-- 同样的鉴权方式
-- 响应: JSON { code, message, result: { text } }
+STT(仍用旧版 openspeech V1):
+- 端点:https://openspeech.bytedance.com/api/v1/asr
+- 鉴权:Authorization: Bearer; <base64(access_key:secret_key)>
+- 请求体: { app: { appid, cluster }, user, audio: { data, format, ... }, request }
+- AppID/AccessKey/SecretKey 在旧版控制台 https://console.volcengine.com/speech/service/10035 拿
 
 Opus 转换:
-- 火山只返回 MP3,前端要 Opus 时用 ffmpeg 转
-- 用 subprocess.run 起 ffmpeg 子进程
+- 火山只输出 mp3/wav/ogg_opus/pcm,iOS 要 Opus-in-OGG 直接拿 ogg_opus 即可;
+  旧 MP3 → Opus 路径仍保留(虽然基本用不到)
 """
 from __future__ import annotations
 
@@ -23,7 +26,6 @@ import logging
 import shutil
 import subprocess
 import tempfile
-import uuid
 from dataclasses import dataclass
 
 import httpx
@@ -40,20 +42,27 @@ logger = logging.getLogger(__name__)
 class VolcengineConfig:
     """火山引擎语音服务配置
 
+    TTS 用 openspeech V3:api_key + resource_id + default_voice
+    STT 用 openspeech V1:app_id + access_key + secret_key
+
     所有字段从环境变量读取(.env → settings → 注入)。
-    app_id / access_key / secret_key 必填(在火山控制台申请)。
     """
 
-    app_id: str
-    access_key: str
-    secret_key: str
-    tts_endpoint: str = "https://openspeech.bytedance.com/api/v1/tts"
+    # ===== TTS(openspeech V3 简化鉴权)=====
+    api_key: str = ""
+    resource_id: str = "seed-tts-2.0"  # X-Api-Resource-Id,模型选择器
+    tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+    default_voice: str = "BV005_streaming"  # V3 API 接受老 BV*_streaming 和新 bigtts 音色
+
+    # ===== STT(openspeech V1 旧版鉴权)=====
+    app_id: str = ""
+    access_key: str = ""
+    secret_key: str = ""
     stt_endpoint: str = "https://openspeech.bytedance.com/api/v1/asr"
-    cluster: str = "volcengine_tts"
-    default_voice: str = "zh_female_qingxin"
+    cluster: str = "volcano_tts"  # STT V1 body 仍需 cluster
 
     def authorization_header(self) -> str:
-        """Bearer token = base64(access_key:secret_key)"""
+        """STT V1 鉴权头(base64 编码 ak:sk,带分号)"""
         token = base64.b64encode(
             f"{self.access_key}:{self.secret_key}".encode("utf-8")
         ).decode("utf-8")
@@ -64,7 +73,7 @@ class VolcengineConfig:
 
 
 def is_ffmpeg_available() -> bool:
-    """检查系统是否安装了 ffmpeg(用于 MP3 → Opus 转换)"""
+    """检查系统是否安装了 ffmpeg(用于 MP3 → Opus 转换,V3 时代基本用不到)"""
     return shutil.which("ffmpeg") is not None
 
 
@@ -93,11 +102,6 @@ def convert_mp3_to_opus(mp3_bytes: bytes) -> bytes:
     opus_path = mp3_path.replace(".mp3", ".opus")
 
     try:
-        # ffmpeg -y: 覆盖输出
-        # -i input: 输入文件
-        # -c:a libopus: 用 Opus 编码器
-        # -b:a 32k: 比特率 32kbps(语音足够)
-        # -vbr on -f opus: 启用 VBR,输出 OGG/Opus
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",
@@ -124,7 +128,6 @@ def convert_mp3_to_opus(mp3_bytes: bytes) -> bytes:
         )
         return opus_bytes
     finally:
-        # 清理临时文件
         try:
             import os
             os.unlink(mp3_path)
@@ -134,27 +137,46 @@ def convert_mp3_to_opus(mp3_bytes: bytes) -> bytes:
             pass
 
 
-# ===== TTS Provider =====
+# ===== TTS Provider(openspeech V3)=====
 
 
 class VolcengineTTSProvider:
-    """火山引擎 TTS 实现
+    """火山引擎 TTS(openspeech V3 大模型 HTTP Chunked 单向流式)
 
     synthesize 流程:
-    1. 组装请求体
-    2. POST 到 TTS 端点
-    3. 拿到 MP3 bytes
-    4. 如果要 Opus 格式,本地 ffmpeg 转
+    1. 校验 api_key / resource_id / text
+    2. 组装 header { X-Api-Key, X-Api-Resource-Id, Content-Type }
+       + body { req_params: { text, speaker, audio_params: { format, sample_rate } } }
+    3. POST 到 openspeech V3 端点
+    4. 读 chunked 流式响应,拼接 bytes
 
     Raises:
-        ValueError: text 为空
-        RuntimeError: 网络/API/编码错误
+        ValueError: text 为空 / api_key 或 resource_id 缺失
+        RuntimeError: 火山 API 错误(非 2xx)
     """
+
+    # AudioFormat → openspeech V3 audio_params.format
+    _FORMAT_MAP = {
+        AudioFormat.MP3: "mp3",
+        AudioFormat.WAV: "wav",
+        AudioFormat.OPUS: "ogg_opus",
+    }
 
     def __init__(self, config: VolcengineConfig, timeout: float = 30.0) -> None:
         self.config = config
         self.timeout = timeout
         self._client: httpx.AsyncClient | None = None
+
+    def _validate(self) -> None:
+        if not self.config.api_key:
+            raise ValueError(
+                "火山 TTS 未配置:需要在 .env 设置 VOLC_API_KEY "
+                "(在 https://console.volcengine.com/speech/new/setting/apikeys 创建)"
+            )
+        if not self.config.resource_id:
+            raise ValueError(
+                "火山 TTS 未配置:需要在 .env 设置 VOLC_RESOURCE_ID (默认 seed-tts-2.0)"
+            )
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -174,97 +196,87 @@ class VolcengineTTSProvider:
     ) -> bytes:
         if not text or not text.strip():
             raise ValueError("text 不能为空")
+        self._validate()
 
         voice = voice_id or self.config.default_voice
+        response_format = self._FORMAT_MAP.get(format, "mp3")
 
-        # 火山 TTS 支持 MP3 / wav / pcm,Opus 走本地转
-        if format == AudioFormat.OPUS:
-            mp3_bytes = await self._synthesize_raw(text, voice, "mp3")
-            return convert_mp3_to_opus(mp3_bytes)
-        elif format == AudioFormat.WAV:
-            return await self._synthesize_raw(text, voice, "wav")
-        else:
-            return await self._synthesize_raw(text, voice, "mp3")
+        return await self._synthesize_raw(text, voice, response_format)
 
     async def _synthesize_raw(
         self,
         text: str,
         voice_id: str,
-        audio_format: str,
+        response_format: str,
     ) -> bytes:
-        """直接调火山 TTS API 拿音频"""
-        # 火山 TTS 异步 API:audio_params 是 JSON-encoded 字符串(实测 500 if nested object)
-        # speech_rate: -50 ~ 50 (字面 0 = 正常速度)
-        audio_params = json.dumps({
-            "format": audio_format,
-            "sample_rate": 16000,
-            "speech_rate": 0,
-        })
-        body = {
-            "app": {
-                "appid": self.config.app_id,
-                "cluster": self.config.cluster,
-                "token": self.config.authorization_header(),
-            },
-            "user": {"uid": "default_user"},
-            "audio": {
-                "voice_type": voice_id,
-                "encoding": audio_format,
-                "speed_ratio": 1.0,
-                "volume_ratio": 1.0,
-                "pitch_ratio": 1.0,
-            },
-            "request": {
-                "reqid": str(uuid.uuid4()),
-                "text": text,
-                "text_type": "plain",
-                "operation": "query",
-                "with_frontend": 1,
-                "frontend_type": "unitTson",
-                "audio_params": audio_params,
-            },
-        }
+        """调 openspeech V3 端点,收集 chunked 流式响应 bytes
 
+        V3 文档:
+        POST {endpoint}
+        headers: X-Api-Key, X-Api-Resource-Id, Content-Type
+        body: { req_params: { text, speaker, audio_params: { format, sample_rate } } }
+        resp: HTTP/1.1 Chunked,二进制音频流
+        """
+        url = self.config.tts_endpoint
         headers = {
-            "Authorization": self.config.authorization_header(),
+            "X-Api-Key": self.config.api_key,
+            "X-Api-Resource-Id": self.config.resource_id,
             "Content-Type": "application/json",
+        }
+        body = {
+            "req_params": {
+                "text": text,
+                "speaker": voice_id,
+                "audio_params": {
+                    "format": response_format,
+                    "sample_rate": 24000,
+                },
+            }
         }
 
         client = await self._get_client()
         try:
-            response = await client.post(
-                self.config.tts_endpoint, json=body, headers=headers,
-            )
+            # stream=True 让 httpx 按 chunk 读,避免一次性把整段响应加载到内存
+            async with client.stream(
+                "POST", url, headers=headers, content=json.dumps(body),
+            ) as response:
+                if response.status_code != 200:
+                    # 错误响应是 JSON,不是 chunked 流
+                    try:
+                        err_body = await response.aread()
+                        err_text = err_body.decode("utf-8", errors="replace")
+                        try:
+                            err_json = json.loads(err_text)
+                            err_msg = err_json.get("message") or err_json.get("error") or err_text[:300]
+                        except json.JSONDecodeError:
+                            err_msg = err_text[:300]
+                    except Exception:
+                        err_msg = f"HTTP {response.status_code}"
+                    raise RuntimeError(
+                        f"火山 TTS API 错误 (HTTP {response.status_code}): {err_msg}"
+                    )
+
+                chunks: list[bytes] = []
+                async for chunk in response.aiter_bytes():
+                    chunks.append(chunk)
+                return b"".join(chunks)
         except httpx.HTTPError as e:
-            raise RuntimeError(f"TTS 网络错误: {e}") from e
-
-        if response.status_code != 200:
-            # 火山可能返回 JSON 错误或纯文本
-            try:
-                err_body = response.json()
-                err_msg = err_body.get("message", str(err_body))
-            except Exception:
-                err_msg = response.text[:200]
-            raise RuntimeError(
-                f"TTS API 错误 (HTTP {response.status_code}): {err_msg}"
-            )
-
-        return response.content
+            raise RuntimeError(f"火山 TTS 网络错误: {e}") from e
 
     @property
     def provider_name(self) -> str:
         return "volcengine"
 
 
-# ===== STT Provider =====
+# ===== STT Provider(openspeech V1)=====
 
 
 class VolcengineSTTProvider:
-    """火山引擎 STT 实现
+    """火山引擎 STT(openspeech V1 大模型 ASR)
 
     transcribe 流程:
     1. 把音频 bytes base64 编码(火山 API 要求)
-    2. POST 到 ASR 端点
+    2. POST 到 ASR 端点,header `Authorization: Bearer; <base64(ak:sk)>`
     3. 解析 JSON 拿到 text
 
     Raises:
@@ -296,7 +308,6 @@ class VolcengineSTTProvider:
         if not audio:
             raise ValueError("audio bytes 不能为空")
 
-        # 火山 ASR 的格式字段名
         format_map = {
             AudioFormat.MP3: "mp3",
             AudioFormat.WAV: "wav",

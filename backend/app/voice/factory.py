@@ -25,21 +25,48 @@ from app.voice.volcengine import VolcengineConfig, VolcengineSTTProvider, Volcen
 logger = logging.getLogger(__name__)
 
 
-def _build_volcengine_config(settings: Settings) -> VolcengineConfig:
-    """从 settings 读火山配置,缺凭据直接抛 ValueError"""
+def _validate_tts_credentials(settings: Settings) -> None:
+    """TTS 选 volcengine 时,缺凭据 → ValueError(早 fail,app 启动时就能发现)
+
+    TTS 用 openspeech V3:只需 VOLC_API_KEY(VOLC_RESOURCE_ID 默认 seed-tts-2.0 可省)。
+    """
+    if not settings.volc_api_key:
+        raise ValueError(
+            "火山 TTS 凭据未配置:需要在 .env 设置 VOLC_API_KEY "
+            "(在 https://console.volcengine.com/speech/new/setting/apikeys 创建)"
+        )
+
+
+def _validate_stt_credentials(settings: Settings) -> None:
+    """STT 选 volcengine 时,缺凭据 → ValueError(早 fail)
+
+    STT 用 openspeech V1:需要 VOLC_APP_ID + VOLC_ACCESS_KEY + VOLC_SECRET_KEY。
+    """
     if not (settings.volc_app_id and settings.volc_access_key and settings.volc_secret_key):
         raise ValueError(
-            "火山引擎凭据未配置:需要在 .env 设置 "
+            "火山 STT 凭据未配置:需要在 .env 设置 "
             "VOLC_APP_ID / VOLC_ACCESS_KEY / VOLC_SECRET_KEY"
         )
+
+
+def _build_volcengine_config(settings: Settings) -> VolcengineConfig:
+    """从 settings 读火山配置,只组装不校验(校验由 get_tts/stt_provider 负责)
+
+    TTS:openspeech V3 — 需要 VOLC_API_KEY + VOLC_RESOURCE_ID(默认 seed-tts-2.0)
+    STT:openspeech V1 — 需要 VOLC_APP_ID + VOLC_ACCESS_KEY + VOLC_SECRET_KEY
+    """
     return VolcengineConfig(
+        # TTS (openspeech V3)
+        api_key=settings.volc_api_key,
+        resource_id=settings.volc_resource_id,
+        tts_endpoint=settings.volc_tts_endpoint,
+        default_voice=settings.volc_default_voice,
+        # STT (openspeech V1)
         app_id=settings.volc_app_id,
         access_key=settings.volc_access_key,
         secret_key=settings.volc_secret_key,
-        tts_endpoint=settings.volc_tts_endpoint,
         stt_endpoint=settings.volc_stt_endpoint,
         cluster=settings.volc_cluster,
-        default_voice=settings.volc_default_voice,
     )
 
 
@@ -85,8 +112,12 @@ def get_tts_provider(settings: Settings) -> TTSProvider:
         ValueError: 选了 volcengine 但 .env 缺凭据
     """
     if settings.tts_provider == "volcengine":
+        _validate_tts_credentials(settings)
         config = _build_volcengine_config(settings)
-        logger.info("TTS provider: volcengine (cluster=%s)", config.cluster)
+        logger.info(
+            "TTS provider: volcengine (resource_id=%s, voice=%s)",
+            config.resource_id, config.default_voice,
+        )
         raw: TTSProvider = VolcengineTTSProvider(config)
     else:
         logger.debug("TTS provider: mock")
@@ -102,6 +133,7 @@ def get_stt_provider(settings: Settings) -> STTProvider:
         MockSTTProvider 或 VolcengineSTTProvider
     """
     if settings.stt_provider == "volcengine":
+        _validate_stt_credentials(settings)
         config = _build_volcengine_config(settings)
         logger.info("STT provider: volcengine (cluster=%s)", config.cluster)
         return VolcengineSTTProvider(config)

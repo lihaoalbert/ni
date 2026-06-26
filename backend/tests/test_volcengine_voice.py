@@ -33,29 +33,35 @@ from app.voice.volcengine import (
 
 
 def test_volcengine_config_defaults() -> None:
-    """Config 默认值"""
+    """Config 默认值(Loop 10.3: TTS 切到 openspeech V3)"""
     config = VolcengineConfig(
+        api_key="test_api_key",
         app_id="test_app",
         access_key="test_ak",
         secret_key="test_sk",
     )
-    assert config.tts_endpoint == "https://openspeech.bytedance.com/api/v1/tts"
+    assert config.tts_endpoint == "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
     assert config.stt_endpoint == "https://openspeech.bytedance.com/api/v1/asr"
+    assert config.resource_id == "seed-tts-2.0"
+    assert config.default_voice == "BV005_streaming"
     assert config.cluster == "volcano_tts"
-    assert config.default_voice == "zh_female_qingxin"
 
 
 def test_volcengine_config_custom() -> None:
     """Config 可覆盖默认值"""
     config = VolcengineConfig(
+        api_key="ak",
+        resource_id="bigtts_2",
         app_id="custom",
         access_key="ak",
         secret_key="sk",
         tts_endpoint="https://custom-tts.example.com/api",
         cluster="my_cluster",
-        default_voice="zh_male_zhongxin",
+        default_voice="BV001_streaming",
     )
     assert config.tts_endpoint == "https://custom-tts.example.com/api"
+    assert config.resource_id == "bigtts_2"
+    assert config.default_voice == "BV001_streaming"
     assert config.cluster == "my_cluster"
 
 
@@ -101,18 +107,22 @@ def test_convert_mp3_to_opus_real_ffmpeg() -> None:
 
 @pytest.mark.asyncio
 async def test_volcengine_tts_sends_correct_request() -> None:
-    """TTS 请求: URL, headers, body 都对"""
+    """TTS 请求(Loop 10.3: openspeech V3 格式):
+    - URL = /api/v3/tts/unidirectional
+    - Headers: X-Api-Key, X-Api-Resource-Id
+    - Body: { req_params: { text, speaker, audio_params: { format, sample_rate } } }
+    """
     config = VolcengineConfig(
-        app_id="my_app",
-        access_key="my_ak",
-        secret_key="my_sk",
+        api_key="my_api_key",
+        resource_id="seed-tts-2.0",
+        app_id="unused", access_key="unused", secret_key="unused",
     )
     provider = VolcengineTTSProvider(config)
 
-    # mock 火山 API
+    # mock 火山 V3 API
     expected_audio = b"\xff\xfb\x90\x00" + b"\x00" * 100  # fake MP3 frame
     with respx.mock(base_url="https://openspeech.bytedance.com") as mock:
-        route = mock.post("/api/v1/tts").respond(
+        route = mock.post("/api/v3/tts/unidirectional").respond(
             200, content=expected_audio,
             headers={"content-type": "audio/mpeg"},
         )
@@ -124,42 +134,44 @@ async def test_volcengine_tts_sends_correct_request() -> None:
     # 验证请求格式
     assert route.called
     request = route.calls.last.request
-    assert "Authorization" in request.headers
+    assert request.headers["X-Api-Key"] == "my_api_key"
+    assert request.headers["X-Api-Resource-Id"] == "seed-tts-2.0"
+    assert "Authorization" not in request.headers  # V3 不再用 Bearer
     body_str = request.content.decode("utf-8")
     body = json.loads(body_str)
-    assert body["app"]["appid"] == "my_app"
-    assert body["app"]["cluster"] == "volcano_tts"
-    assert body["user"]["uid"] == "default_user"
-    assert body["request"]["text"] == "你好世界"
+    assert body["req_params"]["text"] == "你好世界"
+    assert body["req_params"]["speaker"] == "BV005_streaming"  # default
+    assert body["req_params"]["audio_params"]["format"] == "mp3"
+    assert body["req_params"]["audio_params"]["sample_rate"] == 24000
 
 
 @pytest.mark.asyncio
 async def test_volcengine_tts_uses_specified_voice() -> None:
-    """TTS voice_id 参数传到 API"""
+    """TTS voice_id 参数传到 API(V3 speaker 字段)"""
     config = VolcengineConfig(
-        app_id="a", access_key="k", secret_key="k",
-        default_voice="zh_female_qingxin",
+        api_key="ak", resource_id="seed-tts-2.0",
+        default_voice="BV005_streaming",
     )
     provider = VolcengineTTSProvider(config)
 
     with respx.mock(base_url="https://openspeech.bytedance.com") as mock:
-        route = mock.post("/api/v1/tts").respond(
+        route = mock.post("/api/v3/tts/unidirectional").respond(
             200, content=b"\x00" * 50,
         )
-        await provider.synthesize("hi", voice_id="zh_male_zhongxin")
+        await provider.synthesize("hi", voice_id="BV001_streaming")
 
     body = json.loads(route.calls.last.request.content)
-    assert body["request"]["voice_type"] == "zh_male_zhongxin"
+    assert body["req_params"]["speaker"] == "BV001_streaming"
 
 
 @pytest.mark.asyncio
 async def test_volcengine_tts_handles_network_error() -> None:
     """TTS 网络错误 → 友好异常"""
-    config = VolcengineConfig(app_id="a", access_key="k", secret_key="k")
+    config = VolcengineConfig(api_key="ak", resource_id="seed-tts-2.0")
     provider = VolcengineTTSProvider(config)
 
     with respx.mock(base_url="https://openspeech.bytedance.com") as mock:
-        mock.post("/api/v1/tts").mock(side_effect=httpx.ConnectError("network down"))
+        mock.post("/api/v3/tts/unidirectional").mock(side_effect=httpx.ConnectError("network down"))
         with pytest.raises(RuntimeError, match="TTS"):
             await provider.synthesize("test")
 
@@ -167,11 +179,11 @@ async def test_volcengine_tts_handles_network_error() -> None:
 @pytest.mark.asyncio
 async def test_volcengine_tts_handles_api_error() -> None:
     """TTS API 4xx/5xx → 友好异常"""
-    config = VolcengineConfig(app_id="a", access_key="k", secret_key="k")
+    config = VolcengineConfig(api_key="ak", resource_id="seed-tts-2.0")
     provider = VolcengineTTSProvider(config)
 
     with respx.mock(base_url="https://openspeech.bytedance.com") as mock:
-        mock.post("/api/v1/tts").respond(
+        mock.post("/api/v3/tts/unidirectional").respond(
             401,
             json={"code": 401, "message": "unauthorized"},
         )
@@ -180,9 +192,19 @@ async def test_volcengine_tts_handles_api_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_volcengine_tts_missing_api_key_raises() -> None:
+    """TTS 没配 api_key → 直接 ValueError(不发请求)"""
+    config = VolcengineConfig(api_key="", resource_id="seed-tts-2.0")
+    provider = VolcengineTTSProvider(config)
+
+    with pytest.raises(ValueError, match="VOLC_API_KEY"):
+        await provider.synthesize("test")
+
+
+@pytest.mark.asyncio
 async def test_volcengine_tts_empty_text_raises() -> None:
     """TTS 空 text 直接抛 ValueError(不发请求)"""
-    config = VolcengineConfig(app_id="a", access_key="k", secret_key="k")
+    config = VolcengineConfig(api_key="ak", resource_id="seed-tts-2.0")
     provider = VolcengineTTSProvider(config)
 
     with pytest.raises(ValueError):
@@ -340,29 +362,50 @@ async def test_tts_cache_provider_failure_not_cached() -> None:
     assert result == b"success"
 
 
-# ===== TTS Opus conversion integration =====
+# ===== TTS Opus 直出 (Loop 10.3: V3 直接返回 ogg_opus,无需 ffmpeg) =====
 
 
 @pytest.mark.asyncio
-async def test_volcengine_tts_returns_opus_via_ffmpeg(monkeypatch) -> None:
-    """TTS 合成 Opus:API 拿 MP3 + 本地转 Opus"""
-    config = VolcengineConfig(app_id="a", access_key="k", secret_key="k")
+async def test_volcengine_tts_opus_direct_from_v3() -> None:
+    """TTS format=OPUS:V3 直接返回 ogg_opus(无需本地 MP3→Opus 转换)"""
+    config = VolcengineConfig(api_key="ak", resource_id="seed-tts-2.0")
     provider = VolcengineTTSProvider(config)
 
-    # 生成真 MP3
+    # 真 ogg/opus:用 ffmpeg 生成一段 0.3s 静音 OGG/Opus
     if not is_ffmpeg_available():
         pytest.skip("ffmpeg not installed")
-    mp3_bytes = subprocess.run(
+    opus_bytes = subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
-         "-t", "0.3", "-q:a", "9", "-acodec", "libmp3lame", "-f", "mp3", "-"],
+         "-t", "0.3", "-c:a", "libopus", "-f", "ogg", "-"],
         capture_output=True, check=True,
     ).stdout
 
     from app.voice.base import AudioFormat
 
     with respx.mock(base_url="https://openspeech.bytedance.com") as mock:
-        mock.post("/api/v1/tts").respond(200, content=mp3_bytes)
+        mock.post("/api/v3/tts/unidirectional").respond(
+            200, content=opus_bytes,
+            headers={"content-type": "audio/ogg"},
+        )
         audio = await provider.synthesize("hi", format=AudioFormat.OPUS)
 
-    # 转换后应是 OGG 容器
+    # V3 直出 OGG 容器,客户端可直接喂 AVPlayer
     assert audio[:4] == b"OggS"
+
+
+@pytest.mark.asyncio
+async def test_volcengine_tts_opus_request_format_field() -> None:
+    """TTS format=OPUS 时,V3 audio_params.format = ogg_opus"""
+    config = VolcengineConfig(api_key="ak", resource_id="seed-tts-2.0")
+    provider = VolcengineTTSProvider(config)
+
+    from app.voice.base import AudioFormat
+
+    with respx.mock(base_url="https://openspeech.bytedance.com") as mock:
+        route = mock.post("/api/v3/tts/unidirectional").respond(
+            200, content=b"\x00" * 10,
+        )
+        await provider.synthesize("hi", format=AudioFormat.OPUS)
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["req_params"]["audio_params"]["format"] == "ogg_opus"

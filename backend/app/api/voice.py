@@ -126,9 +126,8 @@ async def tts_info(
     让前端知道"火山未配,听的是 mock 或 fallback"。
     """
     provider = settings.tts_provider
-    configured = bool(
-        settings.volc_app_id and settings.volc_access_key and settings.volc_secret_key
-    )
+    # TTS 用 openspeech V3 — 只需 api_key(默认 seed-tts-2.0 资源 ID)
+    configured = bool(settings.volc_api_key)
     # endpoint host 部分,避免泄露 token / 完整 URL
     endpoint_host = settings.volc_tts_endpoint.split("//", 1)[-1].split("/", 1)[0]
     return TTSInfoResponse(

@@ -66,15 +66,29 @@ def test_factory_stt_volcengine_when_settings_volcengine() -> None:
 
 
 def test_factory_volcengine_missing_credentials_raises() -> None:
-    """volcengine 模式但缺凭据 → 友好异常"""
+    """volcengine TTS 模式但缺 VOLC_API_KEY → 友好异常(Loop 10.3: V3 鉴权)"""
     settings = Settings(
         tts_provider="volcengine",
-        volc_app_id="",  # 空
+        volc_api_key="",  # V3 关键凭据缺失
+        volc_app_id="has_app_id",
+        volc_access_key="has_ak",
+        volc_secret_key="has_sk",
+    )
+    with pytest.raises(ValueError, match="VOLC_API_KEY"):
+        get_tts_provider(settings)
+
+
+def test_factory_stt_volcengine_missing_credentials_raises() -> None:
+    """volcengine STT 模式但缺 V1 凭据 → 友好异常"""
+    settings = Settings(
+        stt_provider="volcengine",
+        volc_api_key="has_v3",
+        volc_app_id="",
         volc_access_key="",
         volc_secret_key="",
     )
-    with pytest.raises(ValueError, match="VOLC"):
-        get_tts_provider(settings)
+    with pytest.raises(ValueError, match="VOLC_APP_ID"):
+        get_stt_provider(settings)
 
 
 def test_factory_wraps_with_cache_by_default() -> None:
@@ -93,9 +107,20 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_api_tts_synthesize_returns_audio(client: TestClient) -> None:
+@pytest.fixture
+def client_mock() -> TestClient:
+    """TestClient + 强制 MockTTSProvider 依赖(.env 可能切了 volcengine,
+    但 unit test 不应打真实 API)"""
+    from app.api.voice import get_tts
+
+    app.dependency_overrides[get_tts] = lambda: TTSCache(MockTTSProvider())
+    yield TestClient(app)
+    app.dependency_overrides.pop(get_tts, None)
+
+
+def test_api_tts_synthesize_returns_audio(client_mock: TestClient) -> None:
     """POST /voice/tts/synthesize 返回二进制音频 + content-type"""
-    response = client.post(
+    response = client_mock.post(
         "/voice/tts/synthesize",
         json={"text": "你好世界", "format": "mp3"},
     )
@@ -105,17 +130,17 @@ def test_api_tts_synthesize_returns_audio(client: TestClient) -> None:
     assert "audio" in response.headers.get("content-type", "")
 
 
-def test_api_tts_synthesize_default_format_is_mp3(client: TestClient) -> None:
+def test_api_tts_synthesize_default_format_is_mp3(client_mock: TestClient) -> None:
     """不传 format → 默认 mp3"""
-    response = client.post("/voice/tts/synthesize", json={"text": "hello"})
+    response = client_mock.post("/voice/tts/synthesize", json={"text": "hello"})
     assert response.status_code == 200
     # Mock mp3 输出以 "ID3" 头开头
     assert response.content[:3] == b"ID3"
 
 
-def test_api_tts_synthesize_opus_returns_ogg(client: TestClient) -> None:
+def test_api_tts_synthesize_opus_returns_ogg(client_mock: TestClient) -> None:
     """format=opus → 输出 OGG 容器"""
-    response = client.post(
+    response = client_mock.post(
         "/voice/tts/synthesize",
         json={"text": "hello", "format": "opus"},
     )
@@ -124,24 +149,24 @@ def test_api_tts_synthesize_opus_returns_ogg(client: TestClient) -> None:
     assert response.content[:4] == b"OggS"
 
 
-def test_api_tts_synthesize_with_voice_id(client: TestClient) -> None:
+def test_api_tts_synthesize_with_voice_id(client_mock: TestClient) -> None:
     """传 voice_id 不报错"""
-    response = client.post(
+    response = client_mock.post(
         "/voice/tts/synthesize",
         json={"text": "hi", "voice_id": "custom_voice"},
     )
     assert response.status_code == 200
 
 
-def test_api_tts_synthesize_empty_text_returns_422(client: TestClient) -> None:
+def test_api_tts_synthesize_empty_text_returns_422(client_mock: TestClient) -> None:
     """text 为空 → 422 校验错误"""
-    response = client.post("/voice/tts/synthesize", json={"text": ""})
+    response = client_mock.post("/voice/tts/synthesize", json={"text": ""})
     assert response.status_code == 422
 
 
-def test_api_tts_synthesize_missing_text_returns_422(client: TestClient) -> None:
+def test_api_tts_synthesize_missing_text_returns_422(client_mock: TestClient) -> None:
     """缺 text 字段 → 422"""
-    response = client.post("/voice/tts/synthesize", json={})
+    response = client_mock.post("/voice/tts/synthesize", json={})
     assert response.status_code == 422
 
 
@@ -186,12 +211,12 @@ def test_api_stt_transcribe_missing_audio_returns_422(client: TestClient) -> Non
 # ===== Cache integration =====
 
 
-def test_api_tts_cache_hits_on_repeat(client: TestClient) -> None:
+def test_api_tts_cache_hits_on_repeat(client_mock: TestClient) -> None:
     """同 text 两次调用 → 第二次走缓存(端到端验证)"""
     # 第一次
-    r1 = client.post("/voice/tts/synthesize", json={"text": "cache test", "format": "mp3"})
+    r1 = client_mock.post("/voice/tts/synthesize", json={"text": "cache test", "format": "mp3"})
     # 第二次(同 key)
-    r2 = client.post("/voice/tts/synthesize", json={"text": "cache test", "format": "mp3"})
+    r2 = client_mock.post("/voice/tts/synthesize", json={"text": "cache test", "format": "mp3"})
 
     assert r1.status_code == 200
     assert r2.status_code == 200

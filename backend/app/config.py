@@ -68,13 +68,17 @@ class Settings(BaseSettings):
     stt_provider: Literal["mock", "volcengine"] = "mock"
 
     # 火山引擎语音配置
+    # TTS 用新版 openspeech V3(API Key + resource_id 模型选择器)
+    # STT 仍用旧版 openspeech V1(app_id + access_key + secret_key)
     volc_app_id: str = ""
     volc_access_key: str = ""
     volc_secret_key: str = ""
-    volc_tts_endpoint: str = "https://openspeech.bytedance.com/api/v1/tts"
+    volc_api_key: str = ""
+    volc_resource_id: str = "seed-tts-2.0"  # X-Api-Resource-Id,模型版本选择器
+    volc_tts_endpoint: str = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
     volc_stt_endpoint: str = "https://openspeech.bytedance.com/api/v1/asr"
-    volc_cluster: str = "volcano_tts"
-    volc_default_voice: str = "zh_female_qingxin"
+    volc_default_voice: str = "BV005_streaming"  # 活泼女声
+    volc_cluster: str = "volcano_tts"  # STT V1 body 字段
     # TTS 缓存配置
     # backend: memory (进程内 LRU,默认) | redis (多 worker 共享)
     tts_cache_backend: Literal["memory", "redis"] = "memory"
