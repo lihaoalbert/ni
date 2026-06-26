@@ -8,6 +8,20 @@ public enum SpeechState: Equatable, Sendable {
     case recognizing(String)      // 收到新 partial transcript(关联最新文本,UI 可不绑)
     case speaking                 // TTS 在朗读
     case error(String)
+
+    /// 是否在朗读 — voice mode 自动循环用
+    public var isSpeaking: Bool {
+        if case .speaking = self { return true }
+        return false
+    }
+
+    /// 是否在监听(含 recognizing)
+    public var isListening: Bool {
+        switch self {
+        case .listening, .recognizing: return true
+        default: return false
+        }
+    }
 }
 
 public enum SpeechPermissionStatus: Sendable, Equatable {

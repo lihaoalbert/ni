@@ -192,6 +192,80 @@ final class ChatViewModelVoiceTests: XCTestCase {
         XCTAssertEqual(mockSpeech.voiceIdSpeakCallCount, 1)
     }
 
+    // MARK: - Loop 11: voice mode
+
+    func testVoiceMode_InitiallyOff() async {
+        let vm = makeViewModel()
+        XCTAssertFalse(vm.voiceMode)
+        XCTAssertEqual(vm.voiceCallState, .idle)
+    }
+
+    func testEnterVoiceMode_GrantsPermission_StartsListening() async {
+        mockSpeech.permissionStatus = .undetermined
+        mockSpeech.nextPermissionResult = .granted
+        let vm = makeViewModel()
+
+        await vm.enterVoiceMode()
+
+        XCTAssertTrue(vm.voiceMode)
+        XCTAssertEqual(vm.voiceCallState, .listening)
+        XCTAssertTrue(vm.isListening, "应该已经在监听")
+        XCTAssertTrue(vm.ttsEnabled, "voice mode 下 TTS 自动开")
+    }
+
+    func testEnterVoiceMode_DeniedPermission_StaysOff() async {
+        mockSpeech.permissionStatus = .undetermined
+        mockSpeech.nextPermissionResult = .denied
+        let vm = makeViewModel()
+
+        await vm.enterVoiceMode()
+
+        XCTAssertFalse(vm.voiceMode, "权限拒不应进入 voice mode")
+        XCTAssertEqual(vm.voiceCallState, .idle)
+    }
+
+    func testEnterVoiceMode_TwiceIsNoop() async {
+        mockSpeech.permissionStatus = .granted
+        let vm = makeViewModel()
+
+        await vm.enterVoiceMode()
+        let listeningState = vm.voiceCallState
+        await vm.enterVoiceMode()  // 第二次应被 guard 拦掉
+
+        XCTAssertEqual(vm.voiceCallState, listeningState)
+    }
+
+    func testExitVoiceMode_ClearsState() async {
+        mockSpeech.permissionStatus = .granted
+        let vm = makeViewModel()
+        await vm.enterVoiceMode()
+        XCTAssertTrue(vm.voiceMode)
+
+        vm.exitVoiceMode()
+
+        XCTAssertFalse(vm.voiceMode)
+        XCTAssertEqual(vm.voiceCallState, .idle)
+        XCTAssertFalse(vm.isListening)
+    }
+
+    func testExitVoiceMode_WhileNotEntered_Noop() async {
+        let vm = makeViewModel()
+        vm.exitVoiceMode()
+        XCTAssertFalse(vm.voiceMode)
+    }
+
+    func testSend_InVoiceMode_SetsThinkingState() async {
+        mockSpeech.permissionStatus = .granted
+        mockAPI.eventsToYield = []
+        let vm = makeViewModel()
+        await vm.enterVoiceMode()
+        XCTAssertEqual(vm.voiceCallState, .listening)
+
+        vm.send("你好")
+
+        XCTAssertEqual(vm.voiceCallState, .thinking)
+    }
+
     // MARK: - Helpers
 
     private func makeViewModel(voiceId: String? = nil) -> ChatViewModel {

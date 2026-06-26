@@ -7,6 +7,10 @@
 //   - 按住 mic 走 startListening() 拿 transcript stream,松手 stopListeningAndSend() 自动 send
 //   - assistant 回复完成后自动 speak(_:)(ttsEnabled 关闭时不播)
 //   - 暴露 speechState / currentListeningTranscript / ttsEnabled 给 UI
+// Loop 11: 全自动语音通话(voice mode) —
+//   - enterVoiceMode() → startListening 持续监听;VAD 检测 1.2s 静音 → 自动 stopListeningAndSend
+//   - commitStreamedMessage 后在 voice mode 下自动 speak + 听 TTS 结束 → 再次 startListening
+//   - exitVoiceMode() 挂断,恢复手动 push-to-talk
 import Foundation
 import Observation
 
@@ -21,6 +25,14 @@ public final class ChatViewModel {
         case error(String)
     }
 
+    /// Loop 11: 语音通话子状态(只在 voiceMode == true 时有语义)
+    public enum VoiceCallState: Sendable, Equatable {
+        case idle          // voice mode off
+        case listening     // mic on,等用户说话
+        case thinking      // 已发送,等 LLM 回
+        case speaking      // TTS 在播 assistant 回复
+    }
+
     public private(set) var status: Status = .idle
     public private(set) var messages: [ChatMessage] = []
     public private(set) var currentStreamingText: String = ""
@@ -30,6 +42,13 @@ public final class ChatViewModel {
     public private(set) var speechState: SpeechState = .idle
     public private(set) var currentListeningTranscript: String = ""
     public var ttsEnabled: Bool = true
+
+    // Loop 11: voice mode 状态
+    public private(set) var voiceMode: Bool = false
+    public private(set) var voiceCallState: VoiceCallState = .idle
+    /// voice mode VAD 静音阈值(秒)— partial transcript X 秒没变化 → 当作说完了
+    private let silenceThreshold: TimeInterval = 1.2
+    private var silenceCheckTask: Task<Void, Never>?
 
     // Loop 10.3 UI: 后端 TTS provider 状态 — toolbar badge 用
     // .unknown: 还没探测;.mock: 假数据;.volcengineReady: 火山配齐可调;
@@ -110,6 +129,9 @@ public final class ChatViewModel {
         try? memory.appendAndPersist(conversationId: conversationID, message: userMessage)
         currentStreamingText = ""
         status = .sending
+
+        // Loop 11: voice mode 下切到 thinking 状态(等 LLM 回)
+        if voiceMode { voiceCallState = .thinking }
 
         streamTask = Task { [weak self] in
             await self?.runStream(message: trimmed)
@@ -205,14 +227,28 @@ public final class ChatViewModel {
             // Loop 9/10.3: TTS 自动朗读(若启用 + speech 可用 + 没在监听)
             // - character 有 voiceId → 火山引擎流式(优先)
             // - 无 voiceId → 系统 AVSpeechSynthesizer
-            if ttsEnabled, speech != nil, !isListening {
+            let willSpeak = ttsEnabled && speech != nil && !isListening
+            if willSpeak {
+                // Loop 11: voice mode 下,切到 speaking 状态让 UI 显示"播放中"
+                if voiceMode { voiceCallState = .speaking }
                 if let voiceId = characterVoiceId {
                     Task { @MainActor in
                         await self.speak(text, voiceId: voiceId)
+                        // Loop 11: TTS 结束 → 自动进下一轮 listening
+                        self.triggerVoiceLoopIfNeeded()
                     }
                 } else {
                     speak(text)
+                    // Loop 11: 系统 TTS 走 speak 是同步设 state,等播完也要触发
+                    if voiceMode {
+                        Task { @MainActor in
+                            self.triggerVoiceLoopIfNeeded()
+                        }
+                    }
                 }
+            } else if voiceMode {
+                // 不播 TTS 也要触发循环(用户关了 TTS 但开着 voice mode)
+                triggerVoiceLoopIfNeeded()
             }
         }
         status = .done
@@ -266,6 +302,11 @@ public final class ChatViewModel {
                         self?.speechState = .recognizing(partial)
                     }
                 }
+            }
+            // Loop 11: voice mode 下启动 VAD 静音检测 — 1.2s 无变化即自动停+发
+            if voiceMode {
+                voiceCallState = .listening
+                scheduleSilenceCheck()
             }
         } catch {
             speechState = .error(error.localizedDescription)
@@ -326,6 +367,121 @@ public final class ChatViewModel {
     public func setTTSEnabled(_ enabled: Bool) {
         ttsEnabled = enabled
         if !enabled { stopSpeaking() }
+    }
+
+    // MARK: - Loop 11: 全自动语音通话(voice mode)
+
+    /// 进入语音通话模式 — 用户点 phone icon 后调
+    /// 申请权限 + 启动监听 + 设置 voiceCallState = .listening
+    public func enterVoiceMode() async {
+        guard let speech else { return }
+        guard !voiceMode else { return }
+
+        // 权限兜底(若还没授权,先申请)
+        if speech.permissionStatus != .granted {
+            let status = await speech.requestPermissionsIfNeeded()
+            if status != .granted {
+                speechState = .error("需要麦克风 + 语音识别权限")
+                return
+            }
+        }
+
+        voiceMode = true
+        voiceCallState = .listening
+
+        // 确保 TTS 是开的(语音通话当然要听)
+        if !ttsEnabled { ttsEnabled = true }
+
+        // 停任何残留的 TTS / STT,从头开始
+        stopSpeaking()
+        cancelListening()
+
+        await startListening()
+    }
+
+    /// 退出语音通话模式 — 用户挂断
+    /// 取消监听 / 停 TTS / 重置状态
+    public func exitVoiceMode() {
+        guard voiceMode else { return }
+        voiceMode = false
+        silenceCheckTask?.cancel()
+        silenceCheckTask = nil
+        cancelListening()
+        stopSpeaking()
+        voiceCallState = .idle
+    }
+
+    /// Loop 11: silence 检测 — 当 partial transcript 持续 1.2s 不变,且 voiceMode 开着,
+    /// 就当用户说完了,自动 stopListeningAndSend。
+    /// 在 startListening() 启动时调用,装到 silenceCheckTask。
+    /// 实现:轮询 currentListeningTranscript,记 lastTranscript + lastChangeTime,
+    ///      距上次更新 > silenceThreshold 且 transcript 非空 → 触发停止。
+    private func scheduleSilenceCheck() {
+        silenceCheckTask?.cancel()
+        silenceCheckTask = Task { [weak self] in
+            guard let self else { return }
+            var lastTranscript = self.currentListeningTranscript
+            var lastChange = Date()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(0.2 * 1_000_000_000))
+                if Task.isCancelled { return }
+
+                let now = self.currentListeningTranscript
+                if now != lastTranscript {
+                    lastTranscript = now
+                    lastChange = Date()
+                    continue
+                }
+
+                let elapsed = Date().timeIntervalSince(lastChange)
+                if self.voiceMode
+                    && self.isListening
+                    && !now.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && elapsed >= self.silenceThreshold {
+                    // 静音超时 → 自动停 + 发
+                    await self.stopListeningAndSend()
+                    // stopListeningAndSend 走 send → runStream;后续走 voiceLoopAfterReply
+                    return
+                }
+            }
+        }
+    }
+
+    /// Loop 11: 收到 assistant 回复后,如果在 voice mode,等 TTS 播完 → 重新进入 listening
+    /// 由 commitStreamedMessage 在 TTS 触发后调用。
+    /// 注意:runStream 走完 → handle('done') → commitStreamedMessage,
+    ///       commit 里调 speak;我们要监听 speech.state 从 .speaking → .idle
+    private func voiceLoopAfterReply() async {
+        guard voiceMode else { return }
+        guard let speech else { return }
+
+        // 等 TTS 开始播(小延迟等 commitStreamedMessage 把 speak 调起来)
+        // 极端情况:TTS 失败 / 没启用,几 ms 后 speechState 不会变 .speaking
+        // 用 1s 超时防止永远卡死
+        let speakStartedDeadline = Date().addingTimeInterval(1.0)
+        while !speech.state.isSpeaking && Date() < speakStartedDeadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            if Task.isCancelled || !voiceMode { return }
+        }
+
+        // 等 TTS 结束(state 离开 .speaking)
+        while speech.state.isSpeaking {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if Task.isCancelled || !voiceMode { return }
+        }
+
+        // TTS 播完 → 重新进入 listening
+        guard voiceMode else { return }
+        voiceCallState = .listening
+        await startListening()
+    }
+
+    /// Loop 11: 在 commitStreamedMessage 末尾调 — voice mode 下触发自动循环
+    private func triggerVoiceLoopIfNeeded() {
+        guard voiceMode else { return }
+        Task { @MainActor [weak self] in
+            await self?.voiceLoopAfterReply()
+        }
     }
 
     // MARK: - Loop 10.3 UI: TTS 状态探测

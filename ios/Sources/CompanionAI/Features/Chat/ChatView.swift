@@ -7,6 +7,12 @@
 //   - assistant 消息右侧 🔊 按钮:点一下 speak / 再点 stop
 //   - toolbar 右侧:LLM 状态 badge + TTS 开关(speaker.wave.2 / slash)
 //   - 权限被永久拒 → alert + 引导去设置
+// Loop 11: 全自动语音通话(voice mode)
+//   - toolbar 加 📞 按钮(phone.fill / phone.down.fill)
+//   - 点 phone.fill → enterVoiceMode():进入 listening,VAD 1.2s 静默自动 send
+//   - LLM 回复完 → TTS 播 → voiceLoopAfterReply → 再 listen
+//   - voice mode 开启时 inputBar / hold-mic / VoiceInputOverlay 都隐藏,显示 VoiceCallOverlay
+//   - 点 phone.down.fill → exitVoiceMode()
 import SwiftUI
 import CompanionCore
 #if canImport(UIKit)
@@ -52,18 +58,33 @@ public struct ChatView: View {
             VStack(spacing: 0) {
                 messageList
                 extractionHint  // Loop 8: 显示"自动记住中…"
-                inputBar
+                if !viewModel.voiceMode {
+                    inputBar
+                }
             }
-            // Loop 9: 监听中浮层
-            if viewModel.isListening {
+            // Loop 9: 监听中浮层(只在非 voice mode 下 — voice mode 用专门的 VoiceCallOverlay)
+            if viewModel.isListening && !viewModel.voiceMode {
                 VoiceInputOverlay(
                     transcript: viewModel.currentListeningTranscript,
                     audioLevel: appState.speech?.audioLevel ?? 0
                 )
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            // Loop 11: 全自动语音通话浮层
+            if viewModel.voiceMode {
+                VoiceCallOverlay(
+                    characterName: characterName,
+                    avatarURL: avatarURL,
+                    callState: viewModel.voiceCallState,
+                    currentTranscript: viewModel.currentListeningTranscript,
+                    audioLevel: appState.speech?.audioLevel ?? 0,
+                    onHangup: { viewModel.exitVoiceMode() }
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
-        .animation(.easeInOut(duration: 0.2), value: viewModel.isListening)
+        .animation(.easeInOut(duration: 0.25), value: viewModel.isListening)
+        .animation(.easeInOut(duration: 0.3), value: viewModel.voiceMode)
         .navigationTitle(characterName)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
@@ -111,8 +132,30 @@ public struct ChatView: View {
                 }
                 .accessibilityLabel(viewModel.ttsEnabled ? "关闭朗读" : "开启朗读")
             }
+            // Loop 11: 语音通话入口(只 iOS + speech 可用)
+            #if os(iOS)
+            if appState.speech != nil {
+                voiceCallButton
+            }
+            #endif
             llmStatusBadge
         }
+    }
+
+    /// Loop 11: voice mode 入口按钮 — phone.fill ↔ phone.down.fill
+    private var voiceCallButton: some View {
+        Button {
+            if viewModel.voiceMode {
+                viewModel.exitVoiceMode()
+            } else {
+                Task { await viewModel.enterVoiceMode() }
+            }
+        } label: {
+            Image(systemName: viewModel.voiceMode ? "phone.down.fill" : "phone.fill")
+                .foregroundStyle(viewModel.voiceMode ? .red : .green)
+                .symbolEffect(.pulse, options: .repeating, isActive: viewModel.voiceCallState == .listening)
+        }
+        .accessibilityLabel(viewModel.voiceMode ? "挂断语音通话" : "开始语音通话")
     }
 
     /// Loop 10.3 UI: TTS provider 状态 badge
@@ -537,5 +580,178 @@ private struct StreamingBubble: View {
         #else
         return Color.gray.opacity(0.15)
         #endif
+    }
+}
+
+// MARK: - Loop 11: VoiceCallOverlay
+
+/// 全自动语音通话浮层 — 取代 inputBar,显示:
+/// - 角色头像 + 名称
+/// - 当前 voiceCallState 状态文案(聆听中 / 思考中 / 播放中)
+/// - 实时 transcript(在 .listening 时显示当前听写)
+/// - 音量条(只在 listening 时有动态)
+/// - 挂断按钮(底部居中,红色 phone.down.fill)
+private struct VoiceCallOverlay: View {
+    let characterName: String
+    let avatarURL: URL
+    let callState: ChatViewModel.VoiceCallState
+    let currentTranscript: String
+    let audioLevel: Float
+    let onHangup: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                avatar
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(characterName)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    stateLabel
+                }
+                Spacer()
+                dBIndicator
+                    .frame(width: 32, height: 24)
+            }
+            transcriptLine
+            hangupButton
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 3)
+        )
+        .padding(.horizontal, 16)
+        .padding(.bottom, 24)
+    }
+
+    private var avatar: some View {
+        AsyncImage(url: avatarURL) { phase in
+            switch phase {
+            case .success(let img):
+                img.resizable().scaledToFill()
+            case .failure:
+                Image(systemName: "person.fill").foregroundStyle(.secondary)
+            default:
+                ProgressView()
+            }
+        }
+        .frame(width: 44, height: 44)
+        .clipShape(Circle())
+    }
+
+    @ViewBuilder
+    private var stateLabel: some View {
+        HStack(spacing: 6) {
+            stateIndicator
+            Text(stateText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var stateIndicator: some View {
+        switch callState {
+        case .listening:
+            Circle().fill(.green).frame(width: 8, height: 8)
+        case .thinking:
+            ProgressView().scaleEffect(0.6)
+        case .speaking:
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.caption)
+                .foregroundStyle(.blue)
+        case .idle:
+            EmptyView()
+        }
+    }
+
+    private var stateText: String {
+        switch callState {
+        case .listening: return "聆听中…"
+        case .thinking: return "思考中…"
+        case .speaking: return "播放中…"
+        case .idle: return ""
+        }
+    }
+
+    @ViewBuilder
+    private var transcriptLine: some View {
+        if callState == .listening {
+            Text(currentTranscript.isEmpty ? "请说话…" : currentTranscript)
+                .font(.callout)
+                .foregroundStyle(currentTranscript.isEmpty ? .secondary : .primary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.accentColor.opacity(0.08))
+                )
+        } else if callState == .thinking {
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.6)
+                Text("等待回复…")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.vertical, 6)
+        } else if callState == .speaking {
+            HStack(spacing: 4) {
+                ForEach(0..<3, id: \.self) { i in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.blue)
+                        .frame(width: 4, height: 16)
+                        .opacity(0.5 + Double(i) * 0.25)
+                }
+                Text("正在朗读")
+                    .font(.callout)
+                    .foregroundStyle(.blue)
+                Spacer()
+            }
+            .padding(.vertical, 6)
+        } else {
+            EmptyView()
+        }
+    }
+
+    private var dBIndicator: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(Color.secondary.opacity(0.2))
+                RoundedRectangle(cornerRadius: 3)
+                    .fill(
+                        LinearGradient(
+                            colors: [.green, .yellow, .red],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: geo.size.width * CGFloat(callState == .listening ? audioLevel : 0))
+                    .animation(.easeOut(duration: 0.12), value: audioLevel)
+            }
+        }
+    }
+
+    private var hangupButton: some View {
+        Button(action: onHangup) {
+            ZStack {
+                Circle()
+                    .fill(.red)
+                    .frame(width: 60, height: 60)
+                    .shadow(color: .red.opacity(0.4), radius: 8, y: 2)
+                Image(systemName: "phone.down.fill")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .rotationEffect(.degrees(135))
+            }
+        }
+        .accessibilityLabel("挂断")
+        .frame(maxWidth: .infinity)
+        .padding(.top, 4)
     }
 }
