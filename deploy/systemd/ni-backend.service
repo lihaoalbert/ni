@@ -1,0 +1,47 @@
+[Unit]
+Description=ni Companion AI Backend (FastAPI / uvicorn)
+Documentation=https://github.com/lihaoalbert/ni
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ni
+Group=ni
+WorkingDirectory=/opt/ni/backend
+EnvironmentFile=/opt/ni/backend/.env
+Environment="PATH=/opt/ni/backend/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+
+# uv sync 后,uvicorn 已在 .venv/bin/uvicorn,直接调
+ExecStart=/opt/ni/backend/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 2 \
+    --log-level info \
+    --no-access-log
+
+# 失败行为:非 0 退出就重启,5s 间隔,最多 5 次/分钟
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 资源限制:防止 OOM
+LimitNOFILE=65536
+MemoryMax=1G
+
+# 日志进 journald,可用 journalctl -u ni-backend 看
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ni-backend
+
+# 安全加固(进程降权)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ni/backend/data /opt/ni/backend/.venv
+
+[Install]
+WantedBy=multi-user.target

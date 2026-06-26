@@ -1,0 +1,38 @@
+[Unit]
+Description=ni Qdrant Vector DB (local binary, optional)
+Documentation=https://qdrant.tech
+After=network-online.target
+Wants=network-online.target
+
+# 只有 server-setup.sh 检测到 qdrant 二进制时才 enable
+# 状态:CONDITIONAL — 装了才用,没装 backend 会 fallback 到 in-memory
+
+[Service]
+Type=simple
+User=ni
+Group=ni
+WorkingDirectory=/opt/ni
+Environment="QDRANT__SERVICE__HOST=127.0.0.1"
+Environment="QDRANT__SERVICE__HTTP_PORT=6333"
+Environment="QDRANT__SERVICE__GRPC_PORT=6334"
+Environment="QDRANT__STORAGE__STORAGE_PATH=/opt/ni/backend/data/qdrant"
+
+ExecStart=/opt/ni/bin/qdrant
+Restart=on-failure
+RestartSec=5
+
+LimitNOFILE=65536
+MemoryMax=1G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ni-qdrant
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ni/backend/data/qdrant
+
+[Install]
+WantedBy=multi-user.target

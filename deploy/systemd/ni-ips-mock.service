@@ -1,0 +1,41 @@
+[Unit]
+Description=ni IPS Mock Platform (FastAPI / uvicorn)
+Documentation=https://github.com/lihaoalbert/ni
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ni
+Group=ni
+WorkingDirectory=/opt/ni/ips-mock
+EnvironmentFile=/opt/ni/backend/.env
+Environment="PATH=/opt/ni/ips-mock/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+
+ExecStart=/opt/ni/ips-mock/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8001 \
+    --workers 1 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+LimitNOFILE=65536
+MemoryMax=512M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ni-ips-mock
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/ni/ips-mock/data
+
+[Install]
+WantedBy=multi-user.target
