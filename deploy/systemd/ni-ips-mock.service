@@ -6,8 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ni
-Group=ni
+User=root
+Group=root
 WorkingDirectory=/opt/ni/ips-mock
 EnvironmentFile=/opt/ni/backend/.env
 Environment="PATH=/opt/ni/ips-mock/.venv/bin:/usr/local/bin:/usr/bin:/bin"

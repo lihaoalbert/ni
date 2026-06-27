@@ -6,14 +6,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ni
-Group=ni
+# 跟 ibiren 一致用 root 跑(国内 ECS 上避免 ni 用户 / .venv 权限问题)
+# 真要降权:useradd ni && chown -R ni:ni /opt/ni 后改回 User=ni
+User=root
+Group=root
 WorkingDirectory=/opt/ni/backend
 EnvironmentFile=/opt/ni/backend/.env
 Environment="PATH=/opt/ni/backend/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="PYTHONUNBUFFERED=1"
 
-# uv sync 后,uvicorn 已在 .venv/bin/uvicorn,直接调
 ExecStart=/opt/ni/backend/.venv/bin/uvicorn app.main:app \
     --host 127.0.0.1 \
     --port 8000 \
