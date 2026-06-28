@@ -451,6 +451,8 @@ public final class ChatViewModel {
     /// 由 commitStreamedMessage 在 TTS 触发后调用。
     /// 注意:runStream 走完 → handle('done') → commitStreamedMessage,
     ///       commit 里调 speak;我们要监听 speech.state 从 .speaking → .idle
+    /// Loop 12: TTS 期间 STT 已被 mute，播完必须重新 startListening；
+    ///         speechStartListening 内部会清空 currentListeningTranscript。
     private func voiceLoopAfterReply() async {
         guard voiceMode else { return }
         guard let speech else { return }
@@ -473,6 +475,8 @@ public final class ChatViewModel {
         // TTS 播完 → 重新进入 listening
         guard voiceMode else { return }
         voiceCallState = .listening
+        // Loop 12: startListening 内部会清空 currentListeningTranscript,确保 TTS 期间
+        // 残留的旧 transcript 不会触发 send。scheduleSilenceCheck 重启,继续 VAD 循环。
         await startListening()
     }
 

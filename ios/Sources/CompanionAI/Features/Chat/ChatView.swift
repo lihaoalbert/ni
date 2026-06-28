@@ -156,6 +156,11 @@ public struct ChatView: View {
                 .symbolEffect(.pulse, options: .repeating, isActive: viewModel.voiceCallState == .listening)
         }
         .accessibilityLabel(viewModel.voiceMode ? "挂断语音通话" : "开始语音通话")
+        // Loop 12: 模拟器 mic 是 loopback(扬声器 → 麦克风),voice mode 会产生回声自问自答 —
+        // 真机才能用。先 disable 避免误触发,真机调试时再放开。
+        #if targetEnvironment(simulator)
+        .disabled(true)
+        #endif
     }
 
     /// Loop 10.3 UI: TTS provider 状态 badge

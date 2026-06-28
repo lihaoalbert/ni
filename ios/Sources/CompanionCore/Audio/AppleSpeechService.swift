@@ -45,6 +45,12 @@ public final class AppleSpeechService: NSObject, SpeechServiceProtocol, @uncheck
     private let maxListeningDurationSeconds: TimeInterval = 60
     private var listeningTimeoutTask: Task<Void, Never>?
 
+    // Loop 12: TTS-mute-STT 状态 — speak 期间临时停 STT 防回声自问自答
+    // - sttWasMutedByTTS: 是否由 TTS 触发的 mute（区别于用户主动 stopListening）
+    // - sttTranscriptBeforeMute: mute 前的 transcript（恢复时丢弃，避免播完 TTS 立刻 send 旧 transcript）
+    private var sttWasMutedByTTS: Bool = false
+    private var sttTranscriptBeforeMute: String?
+
     public override init() {
         self.recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN"))
         super.init()
@@ -255,6 +261,18 @@ public final class AppleSpeechService: NSObject, SpeechServiceProtocol, @uncheck
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
+        // TTS 期间 mute STT — 扬声器的声音被 mic 录到会被识别成"用户说话"，
+        // 导致 VAD 误判停 + 发，形成自问自答循环。
+        // 做法:开始播放时停 recognizer + audioEngine，播完重启（外层 ChatViewModel
+        // 持有的 partial transcript 也清零，避免播完后被旧 transcript 触发 stopListeningAndSend）。
+        switch state {
+        case .listening, .recognizing:
+            stopListening()
+            sttWasMutedByTTS = true
+            sttTranscriptBeforeMute = nil
+        default:
+            break
+        }
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "zh-CN")
             ?? AVSpeechSynthesisVoice(language: Locale.current.identifier)
@@ -316,12 +334,18 @@ extension AppleSpeechService: AVSpeechSynthesizerDelegate {
         AudioSessionManager.shared.leave(.playback)
         if case .speaking = state { state = .idle }
         lastSpokenText = nil
+        // Loop 12: TTS 播完，若之前是因为 speak mute 了 STT，重启 STT
+        // 由 ChatViewModel 通过订阅 state 触发，此处只重置标志位
+        sttWasMutedByTTS = false
+        sttTranscriptBeforeMute = nil
     }
 
     public func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) {
         AudioSessionManager.shared.leave(.playback)
         if case .speaking = state { state = .idle }
         lastSpokenText = nil
+        sttWasMutedByTTS = false
+        sttTranscriptBeforeMute = nil
     }
 }
 #endif  // os(iOS)
