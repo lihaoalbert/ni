@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # Anthropic
     anthropic_api_key: str = ""
+    anthropic_base_url: str = ""  # 默认走 api.anthropic.com;改 MiniMax / 其他代理时填
     claude_model_main: str = "claude-sonnet-4-6"
     claude_model_light: str = "claude-haiku-4-5-20251001"
     cache_control_enabled: bool = True  # Day 4 — 默认开启 prompt caching

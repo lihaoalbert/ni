@@ -39,10 +39,15 @@ class ClaudeProvider(LLMProvider):
         timeout: float = 30.0,
         idle_timeout: float = 30.0,
         max_retries: int = 3,
+        base_url: str = "",
     ):
         if not api_key:
             raise ValueError("ANTHROPIC_API_KEY 未配置")
-        self._client = AsyncAnthropic(api_key=api_key)
+        # base_url 非空时走代理(MiniMax / packycode 等 coding plan)
+        client_kwargs: dict = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        self._client = AsyncAnthropic(**client_kwargs)
         self.model = model
         self.cache_control = cache_control
         self.timeout = timeout

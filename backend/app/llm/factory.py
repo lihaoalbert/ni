@@ -21,6 +21,7 @@ def get_llm_provider() -> LLMProvider:
             timeout=settings.llm_timeout_seconds,
             idle_timeout=settings.llm_idle_timeout_seconds,
             max_retries=settings.llm_max_retries,
+            base_url=settings.anthropic_base_url,
         )
 
     if settings.llm_provider == "deepseek":

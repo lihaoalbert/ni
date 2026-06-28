@@ -114,6 +114,9 @@ LOG_JSON=1
 # ===== LLM =====
 LLM_PROVIDER=claude
 ANTHROPIC_API_KEY=__FILL_ME__
+# 默认走官方 api.anthropic.com;用 MiniMax / packycode 等代理时改这里
+# 例:MiniMax  → https://api.minimaxi.com/anthropic
+ANTHROPIC_BASE_URL=
 CLAUDE_MODEL_MAIN=claude-sonnet-4-6
 CLAUDE_MODEL_LIGHT=claude-haiku-4-5-20251001
 
