@@ -150,7 +150,8 @@ final class MockAPIClient: APIClientProtocol, @unchecked Sendable {
     func streamChat(
         userID: String,
         characterID: String,
-        message: String
+        message: String,
+        history: [HistoryTurn]
     ) -> AsyncThrowingStream<SSEEvent, Error> {
         AsyncThrowingStream { continuation in
             // 模拟网络延迟 + 事件流

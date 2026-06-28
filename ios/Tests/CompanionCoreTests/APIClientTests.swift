@@ -101,7 +101,7 @@ final class APIClientTests: XCTestCase {
         )
 
         var received: [SSEEvent] = []
-        for try await event in client.streamChat(userID: "u1", characterID: "ip_001", message: "hi") {
+        for try await event in client.streamChat(userID: "u1", characterID: "ip_001", message: "hi", history: []) {
             received.append(event)
         }
 
@@ -127,7 +127,7 @@ final class APIClientTests: XCTestCase {
         )
 
         var received: [SSEEvent] = []
-        for try await event in client.streamChat(userID: "u1", characterID: "ip_001", message: "hi") {
+        for try await event in client.streamChat(userID: "u1", characterID: "ip_001", message: "hi", history: []) {
             received.append(event)
         }
 

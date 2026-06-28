@@ -19,7 +19,7 @@ from app.llm.factory import get_llm_provider
 from app.logging_setup import log_chat_call
 from app.memory.extractor import MemoryExtractor, NoopExtractor
 from app.memory.schemas import FactCategory
-from app.memory.store import ConversationStore, MemoryStore, get_conversation_store, get_memory_store
+from app.memory.store import MemoryStore, get_memory_store
 from app.schemas import (
     ChatRequest,
     ChatResponse,
@@ -62,19 +62,22 @@ async def chat(
     request: ChatRequest,
     agent: AgentRuntime = Depends(get_agent),
     loader: CharacterLoader = Depends(get_character_loader),
-    conversations: ConversationStore = Depends(get_conversation_store),
     settings: Settings = Depends(get_settings),
     extractor: MemoryExtractor = Depends(get_extractor),
 ) -> ChatResponse:
     """Day 6: 错误处理 + 访问日志 + Agent 循环 + 永久记忆
 
+    Loop 13 重构:4 层记忆全在 iOS SQLite,后端改无状态。
+    - history 直接用 request.history(客户端发来)
+    - 不再调 conversations.append / get_history
+    - 角色失忆的根因是后端 ConversationStore 重启即丢 → 改无状态后 iOS 自己带历史,稳了
+
     流程：
     1. 加载角色 → 构造 system prompt
-    2. 取最近 N 轮会话历史
+    2. 用客户端发的 history 作为 LLM 上下文
     3. AgentRuntime.run() 循环（内部已重试 + 超时）
     4. 异常 → 映射到合适 HTTP 状态码 + 友好 detail
-    5. 保存本轮到历史
-    6. log_chat_call 记录 metrics
+    5. log_chat_call 记录 metrics
     """
     request_id = uuid.uuid4().hex[:12]
 
@@ -94,8 +97,9 @@ async def chat(
 
         system_prompt = build_character_system_prompt(character)
 
-        history_turns = conversations.get_history(request.user_id, request.character_id)
-        history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
+        history_dicts = [
+            {"role": t.role, "content": t.content} for t in request.history
+        ]
 
         try:
             result = await agent.run(
@@ -108,10 +112,6 @@ async def chat(
         except Exception as e:
             # 已重试 + 已超时，最后还是失败 → 映射
             raise to_http_exception(e) from e
-
-        # 写历史
-        conversations.append(request.user_id, request.character_id, "user", request.message)
-        conversations.append(request.user_id, request.character_id, "assistant", result.text)
 
         # 触发记忆提取（fire-and-forget,失败不阻塞 chat）
         import asyncio
@@ -133,7 +133,7 @@ async def chat(
         metrics.cache_creation_tokens = result.cache_creation_tokens
         metrics.cache_read_tokens = result.cache_read_tokens
         metrics.extra["model"] = result.model
-        metrics.extra["history_len"] = len(history_turns)
+        metrics.extra["history_len"] = len(history_dicts)
 
     return ChatResponse(
         reply=result.text,
@@ -203,9 +203,11 @@ async def chat_stream(
     request: ChatRequest,
     agent: AgentRuntime = Depends(get_agent),
     loader: CharacterLoader = Depends(get_character_loader),
-    conversations: ConversationStore = Depends(get_conversation_store),
 ) -> StreamingResponse:
     """Day 5+6: 流式聊天 — Server-Sent Events + 错误处理
+
+    Loop 13 重构:4 层记忆全在 iOS SQLite,后端改无状态。
+    history 用 request.history,不再调 conversations。
 
     事件序列（每行 `data: <json>\\n\\n`）：
     - {type:"text", text:"..."}                  文本增量
@@ -232,8 +234,9 @@ async def chat_stream(
         ) from e
 
     system_prompt = build_character_system_prompt(character)
-    history_turns = conversations.get_history(request.user_id, request.character_id)
-    history_dicts = [{"role": t.role, "content": t.content} for t in history_turns]
+    history_dicts = [
+        {"role": t.role, "content": t.content} for t in request.history
+    ]
 
     async def event_generator():
         accumulated_text = ""
@@ -273,18 +276,8 @@ async def chat_stream(
             last_error = e
             yield f"data: {json.dumps(to_sse_error_event(e), ensure_ascii=False)}\n\n"
 
-        # 流结束 — 写历史
-        # 成功（accumulated_text 非空）且无错误 → 保存
-        if accumulated_text and last_error is None:
-            try:
-                conversations.append(
-                    request.user_id, request.character_id, "user", request.message
-                )
-                conversations.append(
-                    request.user_id, request.character_id, "assistant", accumulated_text
-                )
-            except Exception:
-                logger.exception("保存历史失败")
+        # Loop 13: 后端不再写历史,iOS 已本地落 SQLite。
+        # 流正常结束只打个 metric,失败不补任何东西。
 
     return StreamingResponse(
         event_generator(),

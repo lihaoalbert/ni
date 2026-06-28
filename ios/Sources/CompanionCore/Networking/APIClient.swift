@@ -9,7 +9,8 @@ public protocol APIClientProtocol: Sendable {
     func streamChat(
         userID: String,
         characterID: String,
-        message: String
+        message: String,
+        history: [HistoryTurn]
     ) -> AsyncThrowingStream<SSEEvent, Error>
 
     /// Loop 10.3: 调后端 /voice/tts/synthesize 拿音频 bytes
@@ -19,6 +20,18 @@ public protocol APIClientProtocol: Sendable {
     /// Loop 10.3 UI: 拉 TTS provider 状态 — 后端 /voice/tts/info
     /// 不调实际合成,只读 settings;火山凭据缺失时仍 200,configured=false
     func ttsInfo() async throws -> TTSInfo
+}
+
+/// Loop 13: 客户端发的对话历史一条 — 从 iOS SQLite 取出,作为 LLM 上下文发给后端
+/// 后端无状态,不再自己存历史
+public struct HistoryTurn: Codable, Sendable, Equatable {
+    public let role: String  // "user" | "assistant"
+    public let content: String
+
+    public init(role: String, content: String) {
+        self.role = role
+        self.content = content
+    }
 }
 
 /// Loop 10.3 UI: 后端 TTS 状态镜像 — iOS ChatView toolbar badge 用
@@ -123,7 +136,8 @@ public struct APIClient: APIClientProtocol {
     public func streamChat(
         userID: String,
         characterID: String,
-        message: String
+        message: String,
+        history: [HistoryTurn]
     ) -> AsyncThrowingStream<SSEEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -133,10 +147,12 @@ public struct APIClient: APIClientProtocol {
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    let historyPayload = history.map { ["role": $0.role, "content": $0.content] }
                     req.httpBody = try JSONSerialization.data(withJSONObject: [
                         "user_id": userID,
                         "character_id": characterID,
                         "message": message,
+                        "history": historyPayload,
                     ])
 
                     let (bytes, response) = try await session.bytes(for: req)

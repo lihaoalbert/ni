@@ -133,8 +133,14 @@ public final class ChatViewModel {
         // Loop 11: voice mode 下切到 thinking 状态(等 LLM 回)
         if voiceMode { voiceCallState = .thinking }
 
+        // Loop 13: 把本地 SQLite 里的历史 + 当前 user message 一起打包发给后端
+        // 后端改无状态,ConversationStore 重启即丢的历史不再依赖
+        let history = messages
+            .filter { $0.id != userMessage.id }  // 不包含刚 append 的 user message
+            .map { HistoryTurn(role: $0.role == .user ? "user" : "assistant", content: $0.text) }
+
         streamTask = Task { [weak self] in
-            await self?.runStream(message: trimmed)
+            await self?.runStream(message: trimmed, history: history)
         }
     }
 
@@ -165,13 +171,14 @@ public final class ChatViewModel {
         memory.forgetFact(id: factID)
     }
 
-    private func runStream(message: String) async {
+    private func runStream(message: String, history: [HistoryTurn] = []) async {
         do {
             status = .streaming
             let stream = api.streamChat(
                 userID: userID,
                 characterID: characterID,
-                message: message
+                message: message,
+                history: history
             )
             for try await event in stream {
                 handle(event: event)
