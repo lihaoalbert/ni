@@ -10,12 +10,21 @@ from __future__ import annotations
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.auth import require_user
 from app.data import get_ip, list_ips
 
 router = APIRouter(prefix="/v1/ips", tags=["ips"])
+
+
+def _resolve_base_url(request: Request) -> str:
+    """从请求头推断对外可访问的 base URL — iOS 端要拿这个去拉头像 / 资源。
+    nginx 反代会带 X-Forwarded-Proto + Host;本地测试则回退 localhost。
+    """
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8001"
+    return f"{proto}://{host}"
 
 
 def _to_list_item(ip: dict, base_url: str) -> dict:
@@ -60,12 +69,13 @@ def _to_detail(ip: dict, base_url: str) -> dict:
 
 @router.get("")
 def list_endpoint(
+    request: Request,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: Optional[str] = Query(None),
-    base_url: str = "http://localhost:8001",
     _email: str = Depends(require_user),
 ) -> dict:
+    base_url = _resolve_base_url(request)
     items = list_ips(status=status)
     total = len(items)
     start = (page - 1) * page_size
@@ -82,8 +92,8 @@ def list_endpoint(
 
 @router.get("/{ip_id}")
 def detail(
+    request: Request,
     ip_id: str,
-    base_url: str = "http://localhost:8001",
     _email: str = Depends(require_user),
 ) -> dict:
     ip = get_ip(ip_id)
@@ -92,7 +102,7 @@ def detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"code": "ip_not_found", "message": f"IP {ip_id} not found"}},
         )
-    return _to_detail(ip, base_url)
+    return _to_detail(ip, _resolve_base_url(request))
 
 
 @router.get("/{ip_id}/license")
